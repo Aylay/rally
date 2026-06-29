@@ -21,7 +21,7 @@ const colorOf = (id: string) => TEAMS.find((t) => t.id === id)?.color ?? C.line;
 // Prediction du moteur ; resolve() n'en a pas besoin, on le garde côté UI pour V1.
 const PRED = {
   id: "pred_q1_leader", question: "Who leads at the end of Q1?",
-  options: ["team_fra", "team_aus"], openAtSequence: 2, resolveAtSequence: 9, resolveOn: "team" as const,
+  options: ["team_fra", "team_aus"], openAtSequence: 2, lockAtSequence: 6, resolveAtSequence: 9, resolveOn: "team" as const,
 };
 
 type Result = { winner: string; correct: boolean; hadPick: boolean };
@@ -50,7 +50,13 @@ export default function Home() {
   // reset du prono à chaque nouvelle manche
   useEffect(() => { setPick(null); setResult(null); }, [cycle]);
 
-  const phase = seq < PRED.openAtSequence ? "hidden" : seq < PRED.resolveAtSequence ? "open" : "resolved";
+  const phase =
+    seq < PRED.openAtSequence ? "hidden" :
+    seq < PRED.lockAtSequence ? "open" :
+    seq < PRED.resolveAtSequence ? "locked" : "resolved";
+  // compte à rebours jusqu'au lock — ancré sur la séquence (= l'horloge partagée)
+  const secsToLock = Math.max(0, Math.ceil((PRED.lockAtSequence - seq) * TICK_MS / 1000));
+  const lockFraction = Math.max(0, Math.min(1, (PRED.lockAtSequence - seq) / (PRED.lockAtSequence - PRED.openAtSequence)));
 
   // résolution (une fois par manche) — la bonne réponse n'est jamais stockée,
   // elle est DÉRIVÉE de l'état à resolveAtSequence.
@@ -168,12 +174,24 @@ export default function Home() {
         <div style={{ pointerEvents: "auto", width: "100%", maxWidth: 760, background: "#0e141d",
                       border: `1px solid ${C.line}`, borderRadius: 16, padding: "18px 20px",
                       boxShadow: "0 -24px 60px rgba(0,0,0,.55)" }}>
+          {/* barre de compte à rebours : se vide pendant la fenêtre de vote */}
+          <div style={{ height: 3, borderRadius: 99, background: "#1a2330", overflow: "hidden", marginBottom: 14 }}>
+            {phase === "open" && (
+              <div style={{ height: "100%", width: `${lockFraction * 100}%`, background: C.live,
+                            transition: `width ${TICK_MS}ms linear` }} />
+            )}
+          </div>
+
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
-            <span className="mono" style={{ fontSize: 11, letterSpacing: "0.22em", color: result?.correct ? C.win : C.live }}>
+            <span className="mono" style={{ fontSize: 11, letterSpacing: "0.22em",
+                                            color: phase === "resolved" ? (result?.correct ? C.win : C.live) : phase === "locked" ? C.muted : C.live }}>
               {phase === "resolved" ? "RESULT" : "PREDICTION"}
             </span>
-            <span className="mono" style={{ fontSize: 11, letterSpacing: "0.14em", color: C.muted }}>
-              {phase === "resolved" ? "Q1 · FINAL" : "RESOLVES AT END OF Q1"}
+            <span className="mono" style={{ fontSize: 11, letterSpacing: "0.14em",
+                                            color: phase === "open" ? C.live : C.muted }}>
+              {phase === "open" ? `LOCKS IN 0:${String(secsToLock).padStart(2, "0")}`
+                : phase === "locked" ? "PICKS CLOSED"
+                : "Q1 · FINAL"}
             </span>
           </div>
 
@@ -186,6 +204,8 @@ export default function Home() {
               let border = C.line, bg = "transparent", col = C.muted, tag: string | null = null;
               if (phase === "open") {
                 if (isPick) { border = colorOf(opt); bg = colorOf(opt) + "22"; col = C.ink; }
+              } else if (phase === "locked") {
+                if (isPick) { border = colorOf(opt); bg = colorOf(opt) + "14"; col = C.ink; tag = "YOUR PICK"; }
               } else {
                 if (isWinner) { border = C.win; col = C.ink; tag = "WINNER"; }
                 else if (isPick) { border = C.live; col = C.muted; }
@@ -209,7 +229,8 @@ export default function Home() {
           </div>
 
           <div className="mono" style={{ marginTop: 12, fontSize: 11.5, letterSpacing: "0.04em", color: C.muted, textAlign: "center" }}>
-            {phase === "open" && (pick ? "Locked in — change anytime before Q1 ends" : "Tap a team to predict")}
+            {phase === "open" && (pick ? "You can still change until picks close" : "Tap a team — picks close soon")}
+            {phase === "locked" && (pick ? <span>Locked: {nameOf(pick)} — waiting for end of Q1…</span> : "Picks closed — no pick this round")}
             {phase === "resolved" && (result?.correct ? <span style={{ color: C.win }}>Nailed it · +{WIN_POINTS} pts</span>
               : result?.hadPick ? <span>Missed — {nameOf(result.winner)} led</span>
               : <span>No pick this round — {nameOf(result?.winner ?? "")} led</span>)}
