@@ -7,9 +7,9 @@
 //
 // (Aucun timer ici : le QUAND n'est pas le sujet. On prouve que, peu importe
 //  l'instant d'arrivée, tout le monde converge vers le même état.)
-import { SEED_EVENTS } from "./events.js";
-import { blankState, deriveState, applyEvent } from "./engine.js";
-import type { GameEvent, MatchState } from "./events.js";
+import { SEED_EVENTS } from "../src/events.js";
+import { blankState, deriveState, applyEvent } from "../src/engine.js";
+import type { GameEvent, MatchState } from "../src/events.js";
 
 const script: GameEvent[] = [...SEED_EVENTS].sort((a, b) => a.sequence - b.sequence);
 
