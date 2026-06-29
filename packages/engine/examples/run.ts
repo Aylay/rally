@@ -1,7 +1,7 @@
 // run.ts — fait tourner le moteur et affiche l'état dérivé.
-import { SEED_EVENTS } from "./events.js";
-import { deriveState } from "./engine.js";
-import type { MatchState } from "./events.js";
+import { SEED_EVENTS } from "../src/events.js";
+import { deriveState } from "../src/engine.js";
+import type { MatchState } from "../src/events.js";
 
 // Petite table de correspondance id -> nom (en vrai, ce sera la table `teams`).
 const TEAM_NAMES: Record<string, string> = {

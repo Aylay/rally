@@ -2,9 +2,9 @@
 // Un simple timer fait avancer le match d'un cran, applique le SEUL nouvel
 // événement (option B), et le "diffuse". En AWS, ce timer = EventBridge,
 // le curseur = un item DynamoDB, le console.log = un push WebSocket.
-import { SEED_EVENTS } from "./events.js";
-import { applyEvent, blankState } from "./engine.js";
-import type { GameEvent, MatchState } from "./events.js";
+import { SEED_EVENTS } from "../src/events.js";
+import { applyEvent, blankState } from "../src/engine.js";
+import type { GameEvent, MatchState } from "../src/events.js";
 
 // Le SCRIPT figé du match (en AWS : une Query DynamoDB ; ici : un tableau trié).
 const script: GameEvent[] = [...SEED_EVENTS].sort((a, b) => a.sequence - b.sequence);

@@ -1,0 +1,14 @@
+{
+  "name": "@rally/engine",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": { ".": "./src/index.ts" },
+  "scripts": {
+    "start": "tsx examples/run.ts",
+    "tick": "tsx examples/ticker.ts",
+    "client": "tsx examples/client-demo.ts",
+    "predict": "tsx examples/predictions-demo.ts"
+  },
+  "devDependencies": { "tsx": "^4.19.2", "typescript": "^5.6.3" }
+}
