@@ -16,6 +16,7 @@ const TEAMS = [
 ];
 const nameOf = (id: string) => TEAMS.find((t) => t.id === id)?.name ?? id;
 const colorOf = (id: string) => TEAMS.find((t) => t.id === id)?.color ?? C.line;
+const abbrOf = (id: string) => TEAMS.find((t) => t.id === id)?.abbr ?? "";
 
 // openAtSequence = quand la carte apparaît. C'est un ajout naturel au modèle
 // Prediction du moteur ; resolve() n'en a pas besoin, on le garde côté UI pour V1.
@@ -26,6 +27,12 @@ const PRED = {
 
 type Result = { winner: string; correct: boolean; hadPick: boolean };
 
+const BOTS = [
+  { id: "cpu_chalk", name: "Chalk", skill: 0.85 }, // suit le favori au lock
+  { id: "cpu_flip",  name: "Flip",  skill: 0.55 }, // pile ou face
+  { id: "cpu_rebel", name: "Rebel", skill: 0.30 }, // contrarian
+];
+
 export default function Home() {
   const [seq, setSeq] = useState(0);
   const [cycle, setCycle] = useState(1);
@@ -34,6 +41,8 @@ export default function Home() {
   const [result, setResult] = useState<Result | null>(null);
   const [points, setPoints] = useState(0);
   const [scoredCycle, setScoredCycle] = useState(0);
+  const [botPicks, setBotPicks] = useState<Record<string, string>>({});
+  const [botCycle, setBotCycle] = useState(0);
   const last = SEED_EVENTS[SEED_EVENTS.length - 1].sequence;
 
   // Le "battement" local : en attendant AWS, le navigateur fait avancer le match.
@@ -48,7 +57,7 @@ export default function Home() {
   }, [seq, paused, last]);
 
   // reset du prono à chaque nouvelle manche
-  useEffect(() => { setPick(null); setResult(null); }, [cycle]);
+  useEffect(() => { setPick(null); setResult(null); setBotPicks({}); }, [cycle]);
 
   const phase =
     seq < PRED.openAtSequence ? "hidden" :
@@ -70,6 +79,21 @@ export default function Home() {
     }
   }, [phase, cycle, scoredCycle, pick]);
 
+  // les bots CPU lockent au MÊME instant que tout le monde, avec la seule info dispo au lock :
+  // ils penchent vers l'équipe qui mène au lock selon leur "skill". Zéro triche, zéro futur.
+  useEffect(() => {
+    if ((phase === "locked" || phase === "resolved") && botCycle !== cycle) {
+      const atLock = deriveState(SEED_EVENTS, PRED.lockAtSequence);
+      const fra = atLock.scoreByTeam.team_fra ?? 0, aus = atLock.scoreByTeam.team_aus ?? 0;
+      const lead = fra >= aus ? "team_fra" : "team_aus";
+      const other = lead === "team_fra" ? "team_aus" : "team_fra";
+      const picks: Record<string, string> = {};
+      for (const b of BOTS) picks[b.id] = Math.random() < b.skill ? lead : other;
+      setBotPicks(picks);
+      setBotCycle(cycle);
+    }
+  }, [phase, cycle, botCycle]);
+
   const view = deriveState(SEED_EVENTS, seq);
   const score = { team_fra: view.scoreByTeam.team_fra ?? 0, team_aus: view.scoreByTeam.team_aus ?? 0 };
   const lead = score.team_fra - score.team_aus;
@@ -78,6 +102,18 @@ export default function Home() {
   const justScored = (() => { const e = SEED_EVENTS.find((ev) => ev.sequence === seq); return e && PTS[e.type] ? e.teamId : null; })();
   const feed = SEED_EVENTS.filter((e) => e.sequence <= seq && PTS[e.type]).reverse();
   const onAir = !paused && view.status === "playing";
+
+  // classement de la manche : toi + bots, statut dérivé du pick vs gagnant
+  const winner = result?.winner ?? null;
+  const statusOf = (p: string | null) =>
+    p == null ? (phase === "open" ? "pending" : "nopick")
+    : phase === "resolved" ? (p === winner ? "win" : "miss") : "set";
+  let standings = [
+    { id: "you", name: "You", you: true, pick, status: statusOf(pick) },
+    ...BOTS.map((b) => { const p = botPicks[b.id] ?? null; return { id: b.id, name: b.name, you: false, pick: p, status: statusOf(p) }; }),
+  ];
+  if (phase === "resolved")
+    standings = [...standings].sort((a, b) => (b.status === "win" ? 1 : 0) - (a.status === "win" ? 1 : 0) || (a.you ? -1 : b.you ? 1 : 0));
 
   return (
     <main style={{ background: `radial-gradient(130% 90% at 50% -15%, #18263b 0%, transparent 55%), ${C.bg}`,
@@ -144,6 +180,33 @@ export default function Home() {
             <div className="mono" style={{ marginTop: 9, fontSize: 11, letterSpacing: "0.16em", color: C.muted, textAlign: "center" }}>
               {lead === 0 ? "TIED — ANYONE'S GAME" : `${leader!.name.toUpperCase()} LEAD · +${Math.abs(lead)}`}
             </div>
+          </div>
+        </section>
+
+        {/* standings — toi vs bots CPU (assumés, étiquetés 🤖) */}
+        <section style={{ marginTop: 22 }}>
+          <div className="mono" style={{ fontSize: 11, letterSpacing: "0.22em", color: C.muted, marginBottom: 10, display: "flex", justifyContent: "space-between" }}>
+            <span>STANDINGS · THIS LOOP</span><span style={{ opacity: 0.7 }}>🤖 = CPU</span>
+          </div>
+          <div style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 12, overflow: "hidden" }}>
+            {standings.map((e, idx) => (
+              <div key={e.id} style={{ display: "flex", alignItems: "center", gap: 12, padding: "10px 14px",
+                                       background: e.you ? "#141d2b" : "transparent", borderTop: idx === 0 ? "none" : `1px solid ${C.line}` }}>
+                <span className="mono" style={{ width: 14, fontSize: 12, color: C.muted }}>{idx + 1}</span>
+                <span style={{ fontSize: 13, width: 18, textAlign: "center" }}>{e.you ? "🧑" : "🤖"}</span>
+                <span style={{ flex: 1, fontWeight: e.you ? 700 : 600, fontSize: 14, color: e.you ? C.ink : "#c3c9d4" }}>{e.you ? "You" : `CPU · ${e.name}`}</span>
+                {e.pick
+                  ? <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                      <span style={{ width: 8, height: 8, borderRadius: 2, background: colorOf(e.pick) }} />
+                      <span className="mono" style={{ fontSize: 11, color: C.muted }}>{abbrOf(e.pick)}</span>
+                    </span>
+                  : <span className="mono" style={{ fontSize: 11, color: C.muted, opacity: 0.5 }}>—</span>}
+                <span className="mono" style={{ fontSize: 11, fontWeight: 600, minWidth: 46, textAlign: "right",
+                          color: e.status === "win" ? C.win : e.status === "miss" ? C.live : C.muted }}>
+                  {e.status === "win" ? "+10" : e.status === "miss" ? "miss" : e.status === "set" ? "set" : e.status === "pending" ? "…" : "—"}
+                </span>
+              </div>
+            ))}
           </div>
         </section>
 
