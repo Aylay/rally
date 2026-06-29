@@ -3,7 +3,7 @@
 import { useState, useEffect } from "react";
 import { SEED_EVENTS, deriveState, resolve } from "@rally/engine";
 
-// Points par type — AFFICHAGE uniquement (badge +2/+3). La vérité du score
+// Points par type — AFFICHAGE uniquement (badge +2/+3 du feed). La vérité du score
 // vit dans le moteur ; ceci ne sert qu'au feed.
 const PTS: Record<string, number> = { shot_2pts: 2, shot_3pts: 3, free_throw: 1 };
 
@@ -14,18 +14,16 @@ const TEAMS = [
   { id: "team_fra", name: "France", abbr: "FRA", color: C.fra },
   { id: "team_aus", name: "Australia", abbr: "AUS", color: C.aus },
 ];
+// donnée de référence figée, résolue en mémoire côté front (jamais recopiée ailleurs)
+const PLAYERS: Record<string, string> = { player_mills: "Mills", player_fournier: "Fournier", player_gobert: "Gobert", player_baynes: "Baynes", player_batum: "Batum", player_ingles: "Ingles" };
+const PLAYER_TEAM: Record<string, string> = { player_mills: "team_aus", player_fournier: "team_fra", player_gobert: "team_fra", player_baynes: "team_aus", player_batum: "team_fra", player_ingles: "team_aus" };
+const isTeam = (id: string) => id.startsWith("team_");
 const nameOf = (id: string) => TEAMS.find((t) => t.id === id)?.name ?? id;
 const colorOf = (id: string) => TEAMS.find((t) => t.id === id)?.color ?? C.line;
 const abbrOf = (id: string) => TEAMS.find((t) => t.id === id)?.abbr ?? "";
-
-// openAtSequence = quand la carte apparaît. C'est un ajout naturel au modèle
-// Prediction du moteur ; resolve() n'en a pas besoin, on le garde côté UI pour V1.
-const PRED = {
-  id: "pred_q1_leader", question: "Who leads at the end of Q1?",
-  options: ["team_fra", "team_aus"], openAtSequence: 2, lockAtSequence: 6, resolveAtSequence: 9, resolveOn: "team" as const,
-};
-
-type Result = { winner: string; correct: boolean; hadPick: boolean };
+const labelOf = (id: string) => (isTeam(id) ? nameOf(id) : PLAYERS[id] ?? id);
+const shortOf = (id: string) => (isTeam(id) ? abbrOf(id) : PLAYERS[id] ?? id);
+const dotColorOf = (id: string) => (isTeam(id) ? colorOf(id) : colorOf(PLAYER_TEAM[id] ?? ""));
 
 const BOTS = [
   { id: "cpu_chalk", name: "Chalk", skill: 0.85 }, // suit le favori au lock
@@ -33,20 +31,32 @@ const BOTS = [
   { id: "cpu_rebel", name: "Rebel", skill: 0.30 }, // contrarian
 ];
 
+// File de prédictions : une carte à la fois. Fenêtres non chevauchantes sur le seed.
+// open/lockAtSequence = timing UI en v1 ; ils passeront serveur (lock imposé par la Lambda) en v2.
+const PREDICTIONS = [
+  { id: "pred_first",     question: "Who scores first?", options: ["team_fra", "team_aus"],
+    openAtSequence: 1, lockAtSequence: 2, resolveAtSequence: 3, resolveOn: "team" as const },
+  { id: "pred_topscorer", question: "Top scorer of Q1?", options: ["player_fournier", "player_gobert", "player_mills"],
+    openAtSequence: 5, lockAtSequence: 7, resolveAtSequence: 9, resolveOn: "player" as const },
+];
+type Phase = "hidden" | "open" | "locked" | "resolved";
+const lifecycle = (p: typeof PREDICTIONS[number], seq: number): Phase =>
+  seq < p.openAtSequence ? "hidden" : seq < p.lockAtSequence ? "open" : seq < p.resolveAtSequence ? "locked" : "resolved";
+
+type Result = { winner: string; correct: boolean; hadPick: boolean };
+
 export default function Home() {
   const [seq, setSeq] = useState(0);
   const [cycle, setCycle] = useState(1);
   const [paused, setPaused] = useState(false);
-  const [pick, setPick] = useState<string | null>(null);
-  const [result, setResult] = useState<Result | null>(null);
+  const [picks, setPicks] = useState<Record<string, string>>({});
+  const [results, setResults] = useState<Record<string, Result>>({});
+  const [botPicks, setBotPicks] = useState<Record<string, Record<string, string>>>({});
   const [points, setPoints] = useState(0);
-  const [scoredCycle, setScoredCycle] = useState(0);
-  const [botPicks, setBotPicks] = useState<Record<string, string>>({});
-  const [botCycle, setBotCycle] = useState(0);
+  const [done, setDone] = useState<Record<string, boolean>>({});
   const last = SEED_EVENTS[SEED_EVENTS.length - 1].sequence;
 
   // Le "battement" local : en attendant AWS, le navigateur fait avancer le match.
-  // Plus tard, on remplace ce timer par le flux WebSocket — la logique ne bouge pas.
   useEffect(() => {
     if (paused) {
       const t = setTimeout(() => { setSeq(0); setCycle((c) => c + 1); setPaused(false); }, PAUSE_MS);
@@ -56,43 +66,37 @@ export default function Home() {
     return () => clearTimeout(t);
   }, [seq, paused, last]);
 
-  // reset du prono à chaque nouvelle manche
-  useEffect(() => { setPick(null); setResult(null); setBotPicks({}); }, [cycle]);
+  // reset à chaque nouvelle manche (`done` est gardé par cycle, pas besoin de le vider)
+  useEffect(() => { setPicks({}); setResults({}); setBotPicks({}); }, [cycle]);
 
-  const phase =
-    seq < PRED.openAtSequence ? "hidden" :
-    seq < PRED.lockAtSequence ? "open" :
-    seq < PRED.resolveAtSequence ? "locked" : "resolved";
-  // compte à rebours jusqu'au lock — ancré sur la séquence (= l'horloge partagée)
-  const secsToLock = Math.max(0, Math.ceil((PRED.lockAtSequence - seq) * TICK_MS / 1000));
-  const lockFraction = Math.max(0, Math.min(1, (PRED.lockAtSequence - seq) / (PRED.lockAtSequence - PRED.openAtSequence)));
-
-  // résolution (une fois par manche) — la bonne réponse n'est jamais stockée,
-  // elle est DÉRIVÉE de l'état à resolveAtSequence.
+  // lock des bots + résolution, sur toutes les prédictions, une fois chacune par manche
   useEffect(() => {
-    if (phase === "resolved" && scoredCycle !== cycle) {
-      const winner = resolve(PRED, deriveState(SEED_EVENTS, PRED.resolveAtSequence));
-      const correct = pick != null && pick === winner;
-      setResult({ winner, correct, hadPick: pick != null });
-      if (correct) setPoints((p) => p + WIN_POINTS);
-      setScoredCycle(cycle);
+    for (const p of PREDICTIONS) {
+      const ph = lifecycle(p, seq);
+      const lockKey = `${cycle}:lock:${p.id}`;
+      if ((ph === "locked" || ph === "resolved") && !done[lockKey]) {
+        const atLock = deriveState(SEED_EVENTS, p.lockAtSequence);
+        const tally: Record<string, number> = p.resolveOn === "player" ? atLock.pointsByPlayer : atLock.scoreByTeam;
+        const ranked = [...p.options].sort((a, b) => (tally[b] ?? 0) - (tally[a] ?? 0));
+        const fav = ranked[0], und = ranked[ranked.length - 1];
+        const noInfo = (tally[fav] ?? 0) === (tally[und] ?? 0); // rien à se mettre sous la dent → hasard
+        const bp: Record<string, string> = {};
+        for (const b of BOTS) bp[b.id] = noInfo ? p.options[Math.floor(Math.random() * p.options.length)]
+                                               : (Math.random() < b.skill ? fav : und);
+        setBotPicks((prev) => ({ ...prev, [p.id]: bp }));
+        setDone((prev) => ({ ...prev, [lockKey]: true }));
+      }
+      const resKey = `${cycle}:res:${p.id}`;
+      if (ph === "resolved" && !done[resKey]) {
+        const winner = resolve(p, deriveState(SEED_EVENTS, p.resolveAtSequence));
+        const mine = picks[p.id] ?? null;
+        const correct = mine != null && mine === winner;
+        setResults((prev) => ({ ...prev, [p.id]: { winner, correct, hadPick: mine != null } }));
+        if (correct) setPoints((pt) => pt + WIN_POINTS);
+        setDone((prev) => ({ ...prev, [resKey]: true }));
+      }
     }
-  }, [phase, cycle, scoredCycle, pick]);
-
-  // les bots CPU lockent au MÊME instant que tout le monde, avec la seule info dispo au lock :
-  // ils penchent vers l'équipe qui mène au lock selon leur "skill". Zéro triche, zéro futur.
-  useEffect(() => {
-    if ((phase === "locked" || phase === "resolved") && botCycle !== cycle) {
-      const atLock = deriveState(SEED_EVENTS, PRED.lockAtSequence);
-      const fra = atLock.scoreByTeam.team_fra ?? 0, aus = atLock.scoreByTeam.team_aus ?? 0;
-      const lead = fra >= aus ? "team_fra" : "team_aus";
-      const other = lead === "team_fra" ? "team_aus" : "team_fra";
-      const picks: Record<string, string> = {};
-      for (const b of BOTS) picks[b.id] = Math.random() < b.skill ? lead : other;
-      setBotPicks(picks);
-      setBotCycle(cycle);
-    }
-  }, [phase, cycle, botCycle]);
+  }, [seq, cycle]);
 
   const view = deriveState(SEED_EVENTS, seq);
   const score = { team_fra: view.scoreByTeam.team_fra ?? 0, team_aus: view.scoreByTeam.team_aus ?? 0 };
@@ -103,17 +107,28 @@ export default function Home() {
   const feed = SEED_EVENTS.filter((e) => e.sequence <= seq && PTS[e.type]).reverse();
   const onAir = !paused && view.status === "playing";
 
-  // classement de la manche : toi + bots, statut dérivé du pick vs gagnant
-  const winner = result?.winner ?? null;
-  const statusOf = (p: string | null) =>
-    p == null ? (phase === "open" ? "pending" : "nopick")
-    : phase === "resolved" ? (p === winner ? "win" : "miss") : "set";
+  // prédiction active : en cours (open/locked) ; sinon la dernière résolue ; sinon rien
+  const inFlight = PREDICTIONS.find((p) => { const ph = lifecycle(p, seq); return ph === "open" || ph === "locked"; });
+  const lastResolved = [...PREDICTIONS].reverse().find((p) => lifecycle(p, seq) === "resolved");
+  const active = inFlight ?? lastResolved ?? null;
+  const phase: Phase = active ? lifecycle(active, seq) : "hidden";
+  const aPick = active ? picks[active.id] ?? null : null;
+  const aRes = active ? results[active.id] ?? null : null;
+  const aBots = active ? botPicks[active.id] ?? {} : {};
+  const aIndex = active ? PREDICTIONS.indexOf(active) + 1 : 0;
+  const secsToLock = active ? Math.max(0, Math.ceil((active.lockAtSequence - seq) * TICK_MS / 1000)) : 0;
+  const lockFraction = active ? Math.max(0, Math.min(1, (active.lockAtSequence - seq) / (active.lockAtSequence - active.openAtSequence))) : 0;
+
+  // classement DE LA MANCHE : points cumulés sur toutes les prédictions résolues ce cycle
+  const loopPts = (pickFor: (pid: string) => string | null) => PREDICTIONS.reduce((sum, p) => {
+    const w = results[p.id]?.winner ?? null; if (w == null) return sum;
+    const ch = pickFor(p.id); return sum + (ch != null && ch === w ? WIN_POINTS : 0);
+  }, 0);
   let standings = [
-    { id: "you", name: "You", you: true, pick, status: statusOf(pick) },
-    ...BOTS.map((b) => { const p = botPicks[b.id] ?? null; return { id: b.id, name: b.name, you: false, pick: p, status: statusOf(p) }; }),
-  ];
-  if (phase === "resolved")
-    standings = [...standings].sort((a, b) => (b.status === "win" ? 1 : 0) - (a.status === "win" ? 1 : 0) || (a.you ? -1 : b.you ? 1 : 0));
+    { id: "you", name: "You", you: true, pts: loopPts((pid) => picks[pid] ?? null), apick: aPick },
+    ...BOTS.map((b) => ({ id: b.id, name: b.name, you: false,
+      pts: loopPts((pid) => botPicks[pid]?.[b.id] ?? null), apick: aBots[b.id] ?? null })),
+  ].sort((a, b) => b.pts - a.pts || (a.you ? -1 : b.you ? 1 : 0));
 
   return (
     <main style={{ background: `radial-gradient(130% 90% at 50% -15%, #18263b 0%, transparent 55%), ${C.bg}`,
@@ -127,7 +142,7 @@ export default function Home() {
         @media (prefers-reduced-motion: reduce){ *{animation:none !important; transition:none !important} }
       `}</style>
 
-      <div style={{ width: "100%", maxWidth: 760, paddingBottom: 180 }}>
+      <div style={{ width: "100%", maxWidth: 760, paddingBottom: 190 }}>
         <header style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", marginBottom: 26 }}>
           <div style={{ display: "flex", alignItems: "baseline", gap: 14 }}>
             <span style={{ fontWeight: 900, fontSize: 22, letterSpacing: "0.34em", paddingLeft: 2 }}>RALLY</span>
@@ -137,10 +152,7 @@ export default function Home() {
             </span>
           </div>
           <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 7 }}>
-            <span className="mono" style={{ fontSize: 12, fontWeight: 600, letterSpacing: "0.12em", color: C.win,
-                                            border: `1px solid ${C.line}`, borderRadius: 99, padding: "3px 11px" }}>
-              {points} PTS
-            </span>
+            <span className="mono" style={{ fontSize: 12, fontWeight: 600, letterSpacing: "0.12em", color: C.win, border: `1px solid ${C.line}`, borderRadius: 99, padding: "3px 11px" }}>{points} PTS</span>
             <span className="mono" style={{ fontSize: 11, color: C.muted, letterSpacing: "0.14em", textAlign: "right", lineHeight: 1.5 }}>
               REPLAY · 2019 FIBA WORLD CUP<br /><span style={{ opacity: 0.7 }}>FRANCE–AUSTRALIA · LOOP #{cycle}</span>
             </span>
@@ -183,7 +195,7 @@ export default function Home() {
           </div>
         </section>
 
-        {/* standings — toi vs bots CPU (assumés, étiquetés 🤖) */}
+        {/* standings — toi vs bots CPU, cumulé sur la manche */}
         <section style={{ marginTop: 22 }}>
           <div className="mono" style={{ fontSize: 11, letterSpacing: "0.22em", color: C.muted, marginBottom: 10, display: "flex", justifyContent: "space-between" }}>
             <span>STANDINGS · THIS LOOP</span><span style={{ opacity: 0.7 }}>🤖 = CPU</span>
@@ -195,16 +207,13 @@ export default function Home() {
                 <span className="mono" style={{ width: 14, fontSize: 12, color: C.muted }}>{idx + 1}</span>
                 <span style={{ fontSize: 13, width: 18, textAlign: "center" }}>{e.you ? "🧑" : "🤖"}</span>
                 <span style={{ flex: 1, fontWeight: e.you ? 700 : 600, fontSize: 14, color: e.you ? C.ink : "#c3c9d4" }}>{e.you ? "You" : `CPU · ${e.name}`}</span>
-                {e.pick
+                {e.apick
                   ? <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                      <span style={{ width: 8, height: 8, borderRadius: 2, background: colorOf(e.pick) }} />
-                      <span className="mono" style={{ fontSize: 11, color: C.muted }}>{abbrOf(e.pick)}</span>
+                      <span style={{ width: 8, height: 8, borderRadius: 2, background: dotColorOf(e.apick) }} />
+                      <span className="mono" style={{ fontSize: 11, color: C.muted }}>{shortOf(e.apick)}</span>
                     </span>
-                  : <span className="mono" style={{ fontSize: 11, color: C.muted, opacity: 0.5 }}>—</span>}
-                <span className="mono" style={{ fontSize: 11, fontWeight: 600, minWidth: 46, textAlign: "right",
-                          color: e.status === "win" ? C.win : e.status === "miss" ? C.live : C.muted }}>
-                  {e.status === "win" ? "+10" : e.status === "miss" ? "miss" : e.status === "set" ? "set" : e.status === "pending" ? "…" : "—"}
-                </span>
+                  : <span className="mono" style={{ fontSize: 11, color: C.muted, opacity: 0.5 }}>…</span>}
+                <span className="mono" style={{ fontSize: 13, fontWeight: 700, minWidth: 30, textAlign: "right", color: e.pts > 0 ? C.win : C.muted }}>{e.pts}</span>
               </div>
             ))}
           </div>
@@ -229,60 +238,47 @@ export default function Home() {
         </section>
       </div>
 
-      {/* prediction card : glisse depuis le bas, le match reste visible */}
+      {/* prediction card : file d'attente, une carte à la fois, glisse du bas */}
       <div style={{ position: "absolute", left: 0, right: 0, bottom: 0, display: "flex", justifyContent: "center",
                     padding: "0 18px 18px", pointerEvents: "none",
-                    transform: phase !== "hidden" ? "translateY(0)" : "translateY(150%)",
+                    transform: active && phase !== "hidden" ? "translateY(0)" : "translateY(160%)",
                     transition: "transform .5s cubic-bezier(.4,0,.2,1)" }}>
-        <div style={{ pointerEvents: "auto", width: "100%", maxWidth: 760, background: "#0e141d",
-                      border: `1px solid ${C.line}`, borderRadius: 16, padding: "18px 20px",
-                      boxShadow: "0 -24px 60px rgba(0,0,0,.55)" }}>
-          {/* barre de compte à rebours : se vide pendant la fenêtre de vote */}
+        <div style={{ pointerEvents: "auto", width: "100%", maxWidth: 760, background: "#0e141d", border: `1px solid ${C.line}`,
+                      borderRadius: 16, padding: "18px 20px", boxShadow: "0 -24px 60px rgba(0,0,0,.55)" }}>
           <div style={{ height: 3, borderRadius: 99, background: "#1a2330", overflow: "hidden", marginBottom: 14 }}>
-            {phase === "open" && (
-              <div style={{ height: "100%", width: `${lockFraction * 100}%`, background: C.live,
-                            transition: `width ${TICK_MS}ms linear` }} />
-            )}
+            {phase === "open" && <div style={{ height: "100%", width: `${lockFraction * 100}%`, background: C.live, transition: `width ${TICK_MS}ms linear` }} />}
           </div>
 
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
-            <span className="mono" style={{ fontSize: 11, letterSpacing: "0.22em",
-                                            color: phase === "resolved" ? (result?.correct ? C.win : C.live) : phase === "locked" ? C.muted : C.live }}>
-              {phase === "resolved" ? "RESULT" : "PREDICTION"}
+            <span style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <span className="mono" style={{ fontSize: 11, letterSpacing: "0.22em", color: phase === "resolved" ? (aRes?.correct ? C.win : C.live) : phase === "locked" ? C.muted : C.live }}>
+                {phase === "resolved" ? "RESULT" : "PREDICTION"}
+              </span>
+              <span className="mono" style={{ fontSize: 10, letterSpacing: "0.12em", color: C.muted, opacity: 0.7 }}>{aIndex}/{PREDICTIONS.length}</span>
             </span>
-            <span className="mono" style={{ fontSize: 11, letterSpacing: "0.14em",
-                                            color: phase === "open" ? C.live : C.muted }}>
-              {phase === "open" ? `LOCKS IN 0:${String(secsToLock).padStart(2, "0")}`
-                : phase === "locked" ? "PICKS CLOSED"
-                : "Q1 · FINAL"}
+            <span className="mono" style={{ fontSize: 11, letterSpacing: "0.14em", color: phase === "open" ? C.live : C.muted }}>
+              {phase === "open" ? `LOCKS IN 0:${String(secsToLock).padStart(2, "0")}` : phase === "locked" ? "PICKS CLOSED" : "FINAL"}
             </span>
           </div>
 
-          <div style={{ fontWeight: 700, fontSize: 17, marginBottom: 14 }}>{PRED.question}</div>
+          <div style={{ fontWeight: 700, fontSize: 17, marginBottom: 14 }}>{active?.question}</div>
 
           <div style={{ display: "flex", gap: 10 }}>
-            {PRED.options.map((opt) => {
-              const isPick = pick === opt;
-              const isWinner = result?.winner === opt;
+            {active?.options.map((opt) => {
+              const isPick = aPick === opt;
+              const isWinner = aRes?.winner === opt;
               let border = C.line, bg = "transparent", col = C.muted, tag: string | null = null;
-              if (phase === "open") {
-                if (isPick) { border = colorOf(opt); bg = colorOf(opt) + "22"; col = C.ink; }
-              } else if (phase === "locked") {
-                if (isPick) { border = colorOf(opt); bg = colorOf(opt) + "14"; col = C.ink; tag = "YOUR PICK"; }
-              } else {
-                if (isWinner) { border = C.win; col = C.ink; tag = "WINNER"; }
-                else if (isPick) { border = C.live; col = C.muted; }
-                if (isPick && !isWinner) tag = "YOUR PICK";
-                if (isPick && isWinner) tag = "YOUR PICK ✓";
-              }
+              if (phase === "open") { if (isPick) { border = dotColorOf(opt); bg = dotColorOf(opt) + "22"; col = C.ink; } }
+              else if (phase === "locked") { if (isPick) { border = dotColorOf(opt); bg = dotColorOf(opt) + "14"; col = C.ink; tag = "YOUR PICK"; } }
+              else { if (isWinner) { border = C.win; col = C.ink; tag = "WINNER"; } else if (isPick) { border = C.live; col = C.muted; }
+                     if (isPick && !isWinner) tag = "YOUR PICK"; if (isPick && isWinner) tag = "YOUR PICK ✓"; }
               return (
-                <button key={opt} onClick={() => phase === "open" && setPick(opt)} disabled={phase !== "open"}
-                  style={{ flex: 1, padding: "13px 14px", borderRadius: 12, border: `1.5px solid ${border}`, background: bg,
-                           color: col, fontFamily: "inherit", fontWeight: 700, fontSize: 15,
-                           cursor: phase === "open" ? "pointer" : "default", transition: "all .2s",
-                           display: "flex", flexDirection: "column", alignItems: "center", gap: 3 }}>
+                <button key={opt} onClick={() => phase === "open" && active && setPicks((prev) => ({ ...prev, [active.id]: opt }))} disabled={phase !== "open"}
+                  style={{ flex: 1, padding: "13px 14px", borderRadius: 12, border: `1.5px solid ${border}`, background: bg, color: col,
+                           fontFamily: "inherit", fontWeight: 700, fontSize: 14, cursor: phase === "open" ? "pointer" : "default",
+                           transition: "all .2s", display: "flex", flexDirection: "column", alignItems: "center", gap: 3 }}>
                   <span style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                    <span style={{ width: 9, height: 9, borderRadius: 2, background: colorOf(opt) }} />{nameOf(opt)}
+                    <span style={{ width: 9, height: 9, borderRadius: 2, background: dotColorOf(opt) }} />{labelOf(opt)}
                     {phase === "open" && isPick && " ✓"}
                   </span>
                   {tag && <span className="mono" style={{ fontSize: 9, letterSpacing: "0.14em", color: isWinner ? C.win : C.muted }}>{tag}</span>}
@@ -292,11 +288,11 @@ export default function Home() {
           </div>
 
           <div className="mono" style={{ marginTop: 12, fontSize: 11.5, letterSpacing: "0.04em", color: C.muted, textAlign: "center" }}>
-            {phase === "open" && (pick ? "You can still change until picks close" : "Tap a team — picks close soon")}
-            {phase === "locked" && (pick ? <span>Locked: {nameOf(pick)} — waiting for end of Q1…</span> : "Picks closed — no pick this round")}
-            {phase === "resolved" && (result?.correct ? <span style={{ color: C.win }}>Nailed it · +{WIN_POINTS} pts</span>
-              : result?.hadPick ? <span>Missed — {nameOf(result.winner)} led</span>
-              : <span>No pick this round — {nameOf(result?.winner ?? "")} led</span>)}
+            {phase === "open" && (aPick ? "You can still change until picks close" : "Tap an option — picks close soon")}
+            {phase === "locked" && (aPick ? <span>Locked: {labelOf(aPick)} — waiting for the result…</span> : "Picks closed — no pick this round")}
+            {phase === "resolved" && (aRes?.correct ? <span style={{ color: C.win }}>Nailed it · +{WIN_POINTS} pts</span>
+              : aRes?.hadPick ? <span>Missed — {labelOf(aRes.winner)}</span>
+              : <span>No pick — {labelOf(aRes?.winner ?? "")}</span>)}
           </div>
         </div>
       </div>
