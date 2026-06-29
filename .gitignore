@@ -1,0 +1,30 @@
+# Dependencies
+node_modules/
+.pnp.*
+.yarn/*
+
+# Builds
+dist/
+build/
+out/
+.next/
+*.tsbuildinfo
+
+# Environment
+.env
+.env*.local
+
+# Logs
+*.log
+npm-debug.log*
+pnpm-debug.log*
+yarn-debug.log*
+
+# OS / editors
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Coverage / tests
+coverage/
