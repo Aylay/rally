@@ -15,8 +15,8 @@ const TEAMS = [
   { id: "team_aus", name: "Australia", abbr: "AUS", color: C.aus },
 ];
 // donnée de référence figée, résolue en mémoire côté front (jamais recopiée ailleurs)
-const PLAYERS: Record<string, string> = { player_mills: "Mills", player_fournier: "Fournier", player_gobert: "Gobert", player_baynes: "Baynes", player_batum: "Batum", player_ingles: "Ingles" };
-const PLAYER_TEAM: Record<string, string> = { player_mills: "team_aus", player_fournier: "team_fra", player_gobert: "team_fra", player_baynes: "team_aus", player_batum: "team_fra", player_ingles: "team_aus" };
+const PLAYERS: Record<string, string> = { player_ntilikina: "Ntilikina", player_fournier: "Fournier", player_batum: "Batum", player_mbaye: "M'Baye", player_gobert: "Gobert", player_decolo: "De Colo", player_poirier: "Poirier", player_albicy: "Albicy", player_labeyrie: "Labeyrie", player_toupane: "Toupane", player_mills: "Mills", player_dellavedova: "Dellavedova", player_ingles: "Ingles", player_kay: "Kay", player_bogut: "Bogut", player_baynes: "Baynes", player_landale: "Landale" };
+const PLAYER_TEAM: Record<string, string> = { player_ntilikina: "team_fra", player_fournier: "team_fra", player_batum: "team_fra", player_mbaye: "team_fra", player_gobert: "team_fra", player_decolo: "team_fra", player_poirier: "team_fra", player_albicy: "team_fra", player_labeyrie: "team_fra", player_toupane: "team_fra", player_mills: "team_aus", player_dellavedova: "team_aus", player_ingles: "team_aus", player_kay: "team_aus", player_bogut: "team_aus", player_baynes: "team_aus", player_landale: "team_aus" };
 const isTeam = (id: string) => id.startsWith("team_");
 const nameOf = (id: string) => TEAMS.find((t) => t.id === id)?.name ?? id;
 const colorOf = (id: string) => TEAMS.find((t) => t.id === id)?.color ?? C.line;
@@ -34,16 +34,18 @@ const BOTS = [
 // File de prédictions : une carte à la fois. Fenêtres non chevauchantes sur le seed.
 // open/lockAtSequence = timing UI en v1 ; ils passeront serveur (lock imposé par la Lambda) en v2.
 const PREDICTIONS = [
-  { id: "pred_first",     question: "Who scores first?", options: ["team_fra", "team_aus"],
-    openAtSequence: 1, lockAtSequence: 2, resolveAtSequence: 3, resolveOn: "team" as const },
-  { id: "pred_topscorer", question: "Top scorer of Q1?", options: ["player_fournier", "player_gobert", "player_mills"],
-    openAtSequence: 5, lockAtSequence: 7, resolveAtSequence: 9, resolveOn: "player" as const },
+  { id: "pred_q1_leader", question: "Who leads at the end of Q1?", options: ["team_fra", "team_aus"],
+    openAtSequence: 3, lockAtSequence: 11, resolveAtSequence: 16, resolveOn: "team" as const },
+  { id: "pred_h1_topscorer", question: "Top scorer in the first half?", options: ["player_ingles", "player_fournier", "player_mills"],
+    openAtSequence: 17, lockAtSequence: 24, resolveAtSequence: 31, resolveOn: "player" as const },
+  { id: "pred_bronze", question: "Who wins the bronze medal?", options: ["team_fra", "team_aus"],
+    openAtSequence: 32, lockAtSequence: 60, resolveAtSequence: 72, resolveOn: "team" as const },
 ];
 type Phase = "hidden" | "open" | "locked" | "resolved";
 const lifecycle = (p: typeof PREDICTIONS[number], seq: number): Phase =>
   seq < p.openAtSequence ? "hidden" : seq < p.lockAtSequence ? "open" : seq < p.resolveAtSequence ? "locked" : "resolved";
 
-type Result = { winner: string; correct: boolean; hadPick: boolean };
+type Result = { winners: string[]; correct: boolean; hadPick: boolean };
 
 export default function Home() {
   const [seq, setSeq] = useState(0);
@@ -88,10 +90,10 @@ export default function Home() {
       }
       const resKey = `${cycle}:res:${p.id}`;
       if (ph === "resolved" && !done[resKey]) {
-        const winner = resolve(p, deriveState(SEED_EVENTS, p.resolveAtSequence));
+        const winners = resolve(p, deriveState(SEED_EVENTS, p.resolveAtSequence));
         const mine = picks[p.id] ?? null;
-        const correct = mine != null && mine === winner;
-        setResults((prev) => ({ ...prev, [p.id]: { winner, correct, hadPick: mine != null } }));
+        const correct = mine != null && winners.includes(mine);
+        setResults((prev) => ({ ...prev, [p.id]: { winners, correct, hadPick: mine != null } }));
         if (correct) setPoints((pt) => pt + WIN_POINTS);
         setDone((prev) => ({ ...prev, [resKey]: true }));
       }
@@ -101,7 +103,7 @@ export default function Home() {
   const view = deriveState(SEED_EVENTS, seq);
   const score = { team_fra: view.scoreByTeam.team_fra ?? 0, team_aus: view.scoreByTeam.team_aus ?? 0 };
   const lead = score.team_fra - score.team_aus;
-  const mag = Math.min(Math.abs(lead) / 10, 1);
+  const mag = Math.min(Math.abs(lead) / 15, 1);
   const leader = lead > 0 ? TEAMS[0] : lead < 0 ? TEAMS[1] : null;
   const justScored = (() => { const e = SEED_EVENTS.find((ev) => ev.sequence === seq); return e && PTS[e.type] ? e.teamId : null; })();
   const feed = SEED_EVENTS.filter((e) => e.sequence <= seq && PTS[e.type]).reverse();
@@ -121,8 +123,8 @@ export default function Home() {
 
   // classement DE LA MANCHE : points cumulés sur toutes les prédictions résolues ce cycle
   const loopPts = (pickFor: (pid: string) => string | null) => PREDICTIONS.reduce((sum, p) => {
-    const w = results[p.id]?.winner ?? null; if (w == null) return sum;
-    const ch = pickFor(p.id); return sum + (ch != null && ch === w ? WIN_POINTS : 0);
+    const ws = results[p.id]?.winners ?? null; if (ws == null) return sum;
+    const ch = pickFor(p.id); return sum + (ch != null && ws.includes(ch) ? WIN_POINTS : 0);
   }, 0);
   let standings = [
     { id: "you", name: "You", you: true, pts: loopPts((pid) => picks[pid] ?? null), apick: aPick },
@@ -176,8 +178,8 @@ export default function Home() {
                     <span style={{ fontWeight: 700, fontSize: 15, letterSpacing: "0.04em", color: isLeading ? C.ink : C.muted }}>{t.name}</span>
                   </div>
                   <div style={{ position: "relative" }}>
-                    <span style={{ display: "block", fontWeight: 800, fontSize: 76, lineHeight: 1, letterSpacing: "-0.03em", fontVariantNumeric: "tabular-nums", color: isLeading ? C.ink : "#cfd4dc", marginTop: 6 }}>{score[t.id as "team_fra" | "team_aus"]}</span>
-                    {lit && <span style={{ position: "absolute", inset: -6, borderRadius: 12, background: t.color, animation: "rallyFlash .7s ease-out", pointerEvents: "none" }} />}
+                    <span style={{ display: "block", position: "relative", zIndex: 1, fontWeight: 800, fontSize: 76, lineHeight: 1, letterSpacing: "-0.03em", fontVariantNumeric: "tabular-nums", color: isLeading ? C.ink : "#cfd4dc", marginTop: 6 }}>{score[t.id as "team_fra" | "team_aus"]}</span>
+                    {lit && <span style={{ position: "absolute", inset: -6, borderRadius: 12, background: t.color, animation: "rallyFlash .7s ease-out forwards", pointerEvents: "none", zIndex: 0 }} />}
                   </div>
                 </div>,
               ];
@@ -239,7 +241,7 @@ export default function Home() {
       </div>
 
       {/* prediction card : file d'attente, une carte à la fois, glisse du bas */}
-      <div style={{ position: "absolute", left: 0, right: 0, bottom: 0, display: "flex", justifyContent: "center",
+      <div style={{ position: "fixed", left: 0, right: 0, bottom: 0, display: "flex", justifyContent: "center", zIndex: 50,
                     padding: "0 18px 18px", pointerEvents: "none",
                     transform: active && phase !== "hidden" ? "translateY(0)" : "translateY(160%)",
                     transition: "transform .5s cubic-bezier(.4,0,.2,1)" }}>
@@ -266,7 +268,7 @@ export default function Home() {
           <div style={{ display: "flex", gap: 10 }}>
             {active?.options.map((opt) => {
               const isPick = aPick === opt;
-              const isWinner = aRes?.winner === opt;
+              const isWinner = aRes?.winners?.includes(opt) ?? false;
               let border = C.line, bg = "transparent", col = C.muted, tag: string | null = null;
               if (phase === "open") { if (isPick) { border = dotColorOf(opt); bg = dotColorOf(opt) + "22"; col = C.ink; } }
               else if (phase === "locked") { if (isPick) { border = dotColorOf(opt); bg = dotColorOf(opt) + "14"; col = C.ink; tag = "YOUR PICK"; } }
@@ -291,8 +293,8 @@ export default function Home() {
             {phase === "open" && (aPick ? "You can still change until picks close" : "Tap an option — picks close soon")}
             {phase === "locked" && (aPick ? <span>Locked: {labelOf(aPick)} — waiting for the result…</span> : "Picks closed — no pick this round")}
             {phase === "resolved" && (aRes?.correct ? <span style={{ color: C.win }}>Nailed it · +{WIN_POINTS} pts</span>
-              : aRes?.hadPick ? <span>Missed — {labelOf(aRes.winner)}</span>
-              : <span>No pick — {labelOf(aRes?.winner ?? "")}</span>)}
+              : aRes?.hadPick ? <span>Missed — {(aRes?.winners ?? []).map(labelOf).join(" & ")}</span>
+              : <span>No pick — {(aRes?.winners ?? []).map(labelOf).join(" & ")}</span>)}
           </div>
         </div>
       </div>
