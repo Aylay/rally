@@ -3,15 +3,11 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Cœur event-sourcing du compagnon de match : flux d'événements -> fold -> état dérivé.",
   "scripts": {
-    "start": "tsx run.ts",
-    "tick": "tsx ticker.ts",
-    "client": "tsx client-demo.ts",
-    "predict": "tsx predictions-demo.ts"
-  },
-  "devDependencies": {
-    "tsx": "^4.19.2",
-    "typescript": "^5.6.3"
+    "engine:start": "pnpm --filter @rally/engine start",
+    "engine:tick": "pnpm --filter @rally/engine tick",
+    "engine:client": "pnpm --filter @rally/engine client",
+    "engine:predict": "pnpm --filter @rally/engine predict",
+    "dev": "pnpm --filter @rally/web dev"
   }
 }
