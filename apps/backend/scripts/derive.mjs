@@ -1,5 +1,4 @@
-// Lecteur : dérive la séquence courante depuis l'anchor (zéro stockage de la séquence).
-// Pas de SDK à installer : on passe par l'AWS CLI (déjà configuré).
+// Lecteur : dérive cycle + séquence depuis l'anchor de BASE (modulo). Zéro stockage de l'état.
 import { execSync } from "node:child_process";
 
 const REGION = process.env.AWS_REGION || "eu-west-3";
@@ -14,25 +13,24 @@ try {
     { encoding: "utf8" }
   );
   item = JSON.parse(raw).Item;
-} catch (e) {
-  console.error("Erreur get-item :", e.message.split("\n")[0]);
-  process.exit(1);
-}
-if (!item) { console.log("Pas encore d'anchor (attends le 1er tick EventBridge, ou amorce via invoke)."); process.exit(0); }
+} catch (e) { console.error("get-item:", e.message.split("\n")[0]); process.exit(1); }
+if (!item) { console.log("Pas d'anchor (invoke la Lambda une fois pour l'amorcer)."); process.exit(0); }
 
-const startedAt = Number(item.cycleStartedAt.N);
-const tickMs = Number(item.tickMs.N);
+const baseStartedAt = Number(item.baseStartedAt.N);
+const tickMs  = Number(item.tickMs.N);
 const lastSeq = Number(item.lastSequence.N);
 const pauseMs = Number(item.pauseMs.N);
-const cycleId = item.cycleId.S;
 
-const elapsed = Date.now() - startedAt;
-const playMs = lastSeq * tickMs;
+const playMs  = lastSeq * tickMs;
+const cycleMs = playMs + pauseMs;
+
+const total = Date.now() - baseStartedAt;   // temps écoulé depuis l'origine fixe
+const cycleIndex = Math.floor(total / cycleMs);  // quel tour de boucle (dérivé)
+const within = total % cycleMs;                  // où on en est DANS ce tour
 
 let phase, seq;
-if (elapsed < playMs)            { phase = "PLAYING";            seq = Math.min(Math.floor(elapsed / tickMs) + 1, lastSeq); }
-else if (elapsed < playMs + pauseMs) { phase = "PAUSE (final)";  seq = lastSeq; }
-else                             { phase = "CYCLE OVER (waiting roll)"; seq = lastSeq; }
+if (within < playMs) { phase = "PLAYING";       seq = Math.min(Math.floor(within / tickMs) + 1, lastSeq); }
+else                 { phase = "PAUSE (final)"; seq = lastSeq; }
 
 const bar = "█".repeat(Math.round((seq / lastSeq) * 24)).padEnd(24, "·");
-console.log(`${cycleId}  [${bar}]  seq ${String(seq).padStart(2)}/${lastSeq}  ${phase}  (+${(elapsed/1000).toFixed(0)}s)`);
+console.log(`cycle #${cycleIndex}  [${bar}]  seq ${String(seq).padStart(2)}/${lastSeq}  ${phase}  (loop +${(within/1000).toFixed(0)}s)`);

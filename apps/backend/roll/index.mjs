@@ -1,6 +1,9 @@
-// Rally — concierge de cycle (Modèle B, time-anchor).
-// On NE tick PAS. On regarde si le cycle est fini ; si oui, on en démarre un nouveau.
-// Le SDK AWS v3 est fourni par le runtime nodejs22.x → aucun node_modules à packager.
+// Rally — gardien de l'anchor de base (Modèle B, loop DÉRIVÉE).
+// La boucle est entièrement dérivée du temps côté lecteur/client (modulo) → rebouclage
+// instantané, zéro trou. Le serveur ne "tick" ni ne "roll" plus : il garantit juste que
+// l'anchor de BASE existe. baseStartedAt est FIXE : posé une fois, ne bouge plus jamais.
+// (En V2, cette même Lambda + EventBridge récupèrent leur vrai job : la transition de match,
+//  qui elle n'est PAS dérivable du temps.)
 import { DynamoDBClient, GetItemCommand, PutItemCommand } from "@aws-sdk/client-dynamodb";
 
 const ddb = new DynamoDBClient({});
@@ -13,58 +16,29 @@ const SEED = {
 };
 
 export const handler = async () => {
-  const now = Date.now();
   const { Item } = await ddb.send(new GetItemCommand({ TableName: TABLE, Key: { pk: { S: PK } } }));
-
-  // Pas encore d'anchor → on amorce le tout premier cycle.
-  if (!Item) {
-    await startCycle(now, SEED, null);
-    console.log(JSON.stringify({ action: "seeded", startedAt: now }));
-    return;
+  if (Item) {
+    console.log(JSON.stringify({ action: "ok", baseStartedAt: Number(Item.baseStartedAt?.N) }));
+    return; // anchor présent → rien à faire, la boucle se dérive toute seule
   }
-
-  const cfg = {
-    lastSequence: Number(Item.lastSequence.N),
-    tickMs: Number(Item.tickMs.N),
-    pauseMs: Number(Item.pauseMs.N),
-  };
-  const startedAt = Number(Item.cycleStartedAt.N);
-  const cycleMs = cfg.lastSequence * cfg.tickMs + cfg.pauseMs; // jeu + pause
-  const elapsed = now - startedAt;
-
-  if (elapsed >= cycleMs) {
-    await startCycle(now, cfg, startedAt); // roll, conditionnel sur l'ancien startedAt
-    console.log(JSON.stringify({ action: "rolled", from: startedAt, to: now }));
-  } else {
-    console.log(JSON.stringify({ action: "noop", elapsedMs: elapsed, remainingMs: cycleMs - elapsed }));
+  // Anchor absent → on amorce une base FIXE (le cycle 0 démarre maintenant).
+  const now = Date.now();
+  try {
+    await ddb.send(new PutItemCommand({
+      TableName: TABLE,
+      Item: {
+        pk: { S: PK },
+        baseStartedAt: { N: String(now) },   // FIXE : l'origine du temps, immuable
+        status: { S: "running" },
+        lastSequence: { N: String(SEED.lastSequence) },
+        tickMs: { N: String(SEED.tickMs) },
+        pauseMs: { N: String(SEED.pauseMs) },
+      },
+      ConditionExpression: "attribute_not_exists(pk)", // idempotent : ne réamorce jamais par-dessus
+    }));
+    console.log(JSON.stringify({ action: "seeded", baseStartedAt: now }));
+  } catch (e) {
+    if (e.name === "ConditionalCheckFailedException") console.log(JSON.stringify({ action: "raced-ok" }));
+    else throw e;
   }
 };
-
-async function startCycle(now, cfg, expectedStartedAt) {
-  const cmd = {
-    TableName: TABLE,
-    Item: {
-      pk: { S: PK },
-      cycleId: { S: `cycle_${now}` },          // recette d'id = timestamp (tranche l'item ouvert du carnet)
-      cycleStartedAt: { N: String(now) },
-      status: { S: "running" },
-      lastSequence: { N: String(cfg.lastSequence) },
-      tickMs: { N: String(cfg.tickMs) },
-      pauseMs: { N: String(cfg.pauseMs) },
-    },
-  };
-  // Idempotence : on ne reboucle QUE si personne ne l'a déjà fait (anti double-roll).
-  if (expectedStartedAt === null) {
-    cmd.ConditionExpression = "attribute_not_exists(pk)";                       // amorçage
-  } else {
-    cmd.ConditionExpression = "cycleStartedAt = :old";                          // roll
-    cmd.ExpressionAttributeValues = { ":old": { N: String(expectedStartedAt) } };
-  }
-  try {
-    await ddb.send(new PutItemCommand(cmd));
-  } catch (e) {
-    if (e.name === "ConditionalCheckFailedException") {
-      console.log(JSON.stringify({ action: "skip", reason: "already-done" }));
-    } else throw e;
-  }
-}

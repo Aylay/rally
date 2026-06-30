@@ -2,7 +2,8 @@ AWSTemplateFormatVersion: '2010-09-09'
 Transform: AWS::Serverless-2016-10-31
 Description: >
   Rally backend — heartbeat (Modèle B, time-anchor).
-  Tranche 1 : table d'état + concierge de cycle (roll). Pas encore de WebSocket.
+  Loop DÉRIVÉE (modulo) côté client : rebouclage instantané, zéro trou.
+  La Lambda ne roll plus — elle garantit juste l'anchor de base (gardien + couture V2).
 
 Globals:
   Function:
@@ -25,7 +26,7 @@ Resources:
         - AttributeName: pk
           KeyType: HASH
 
-  # La concierge : réveillée chaque minute par EventBridge, reboucle le cycle quand il est écoulé.
+  # Le gardien : garantit que l'anchor de base existe (self-heal). Ne pilote plus l'horloge.
   RollFunction:
     Type: AWS::Serverless::Function
     Properties:
@@ -43,12 +44,12 @@ Resources:
         - DynamoDBCrudPolicy:           # SAM génère la policy IAM minimale sur CETTE table
             TableName: !Ref RallyStateTable
       Events:
-        Heartbeat:
-          Type: Schedule               # = règle EventBridge (plancher : rate(1 minute))
+        Guardian:
+          Type: Schedule               # = règle EventBridge (couture V2 + self-heal)
           Properties:
-            Schedule: rate(1 minute)
-            Name: rally-heartbeat
-            Description: Reboucle le match quand un cycle est écoulé.
+            Schedule: rate(1 hour)     # plus l'horloge : un simple filet de sécurité
+            Name: rally-guardian
+            Description: Garantit l'anchor de base ; reprendra la transition de match en V2.
 
 Outputs:
   TableName:
