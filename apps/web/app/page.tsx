@@ -8,6 +8,10 @@ import { SEED_EVENTS, deriveState, resolve } from "@rally/engine";
 const PTS: Record<string, number> = { shot_2pts: 2, shot_3pts: 3, free_throw: 1 };
 
 const TICK_MS = 1500, PAUSE_MS = 5000, WIN_POINTS = 10;
+
+// Endpoint public de l'anchor (Modèle B). Absent → on reste en replay local (fallback).
+const STATE_URL = process.env.NEXT_PUBLIC_RALLY_STATE_URL;
+type Anchor = { matchId: string; baseStartedAt: number; lastSequence: number; tickMs: number; pauseMs: number; status: string; serverNow: number };
 const C = { bg: "#0a0d12", panel: "#10151d", line: "#202a38", ink: "#f1efe9", muted: "#828c9c",
             fra: "#3b74ff", aus: "#f5c518", live: "#ff5640", win: "#34e29a" };
 const TEAMS = [
@@ -51,6 +55,8 @@ export default function Home() {
   const [seq, setSeq] = useState(0);
   const [cycle, setCycle] = useState(1);
   const [paused, setPaused] = useState(false);
+  const [anchor, setAnchor] = useState<Anchor | null>(null);
+  const [offset, setOffset] = useState(0); // calage d'horloge : serverNow − clientNow
   const [picks, setPicks] = useState<Record<string, string>>({});
   const [results, setResults] = useState<Record<string, Result>>({});
   const [botPicks, setBotPicks] = useState<Record<string, Record<string, string>>>({});
@@ -58,15 +64,44 @@ export default function Home() {
   const [done, setDone] = useState<Record<string, boolean>>({});
   const last = SEED_EVENTS[SEED_EVENTS.length - 1].sequence;
 
-  // Le "battement" local : en attendant AWS, le navigateur fait avancer le match.
+  // 1) On récupère l'anchor partagé UNE fois → calage d'horloge (offset). Échec = replay local.
   useEffect(() => {
+    if (!STATE_URL) return;
+    let alive = true;
+    fetch(STATE_URL)
+      .then((r) => r.json())
+      .then((a: Anchor) => { if (alive && a?.baseStartedAt) { setOffset(a.serverNow - Date.now()); setAnchor(a); } })
+      .catch(() => {/* on garde le fallback local */});
+    return () => { alive = false; };
+  }, []);
+
+  // 2a) Battement DÉRIVÉ (Modèle B) : actif dès que l'anchor est là. Tout vient du temps partagé.
+  useEffect(() => {
+    if (!anchor) return;
+    const playMs = anchor.lastSequence * anchor.tickMs;
+    const cycleMs = playMs + anchor.pauseMs;
+    const tick = () => {
+      const total = Date.now() + offset - anchor.baseStartedAt;
+      const within = ((total % cycleMs) + cycleMs) % cycleMs; // modulo sûr même si offset négatif
+      setSeq(within < playMs ? Math.min(Math.floor(within / anchor.tickMs) + 1, anchor.lastSequence) : anchor.lastSequence);
+      setPaused(within >= playMs);
+      setCycle(Math.floor(total / cycleMs) + 1);
+    };
+    tick();
+    const id = setInterval(tick, 200); // ne POSSÈDE pas l'état : il repeint depuis l'horloge
+    return () => clearInterval(id);
+  }, [anchor, offset]);
+
+  // 2b) Fallback : replay local (l'ancien battement), actif TANT QUE l'anchor n'est pas chargé.
+  useEffect(() => {
+    if (anchor) return;
     if (paused) {
       const t = setTimeout(() => { setSeq(0); setCycle((c) => c + 1); setPaused(false); }, PAUSE_MS);
       return () => clearTimeout(t);
     }
     const t = setTimeout(() => { if (seq >= last) setPaused(true); else setSeq(seq + 1); }, TICK_MS);
     return () => clearTimeout(t);
-  }, [seq, paused, last]);
+  }, [anchor, seq, paused, last]);
 
   // reset à chaque nouvelle manche (`done` est gardé par cycle, pas besoin de le vider)
   useEffect(() => { setPicks({}); setResults({}); setBotPicks({}); }, [cycle]);
@@ -156,7 +191,7 @@ export default function Home() {
           <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 7 }}>
             <span className="mono" style={{ fontSize: 12, fontWeight: 600, letterSpacing: "0.12em", color: C.win, border: `1px solid ${C.line}`, borderRadius: 99, padding: "3px 11px" }}>{points} PTS</span>
             <span className="mono" style={{ fontSize: 11, color: C.muted, letterSpacing: "0.14em", textAlign: "right", lineHeight: 1.5 }}>
-              REPLAY · 2019 FIBA WORLD CUP<br /><span style={{ opacity: 0.7 }}>FRANCE–AUSTRALIA · LOOP #{cycle}</span>
+              REPLAY · 2019 FIBA WORLD CUP<br /><span style={{ opacity: 0.7 }}>FRANCE–AUSTRALIA · LOOP #{cycle}{anchor ? " · SERVER-SYNCED" : ""}</span>
             </span>
           </div>
         </header>
