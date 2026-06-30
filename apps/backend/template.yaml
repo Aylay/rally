@@ -1,0 +1,57 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  Rally backend — heartbeat (Modèle B, time-anchor).
+  Tranche 1 : table d'état + concierge de cycle (roll). Pas encore de WebSocket.
+
+Globals:
+  Function:
+    Runtime: nodejs22.x
+    Architectures: [arm64]     # ~20% moins cher, et le SDK AWS v3 est fourni par le runtime
+    Timeout: 10
+    MemorySize: 128
+
+Resources:
+  # L'anchor : un seul petit item. La séquence courante n'est JAMAIS stockée, elle se dérive du temps.
+  RallyStateTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: RallyState
+      BillingMode: PAY_PER_REQUEST     # on-demand : zéro capacity planning, idéal pour une charge minuscule
+      AttributeDefinitions:
+        - AttributeName: pk
+          AttributeType: S
+      KeySchema:
+        - AttributeName: pk
+          KeyType: HASH
+
+  # La concierge : réveillée chaque minute par EventBridge, reboucle le cycle quand il est écoulé.
+  RollFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: rally-roll
+      CodeUri: roll/
+      Handler: index.handler
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref RallyStateTable
+          MATCH_PK: "match#fra_aus_2019"
+          LAST_SEQUENCE: "73"     # défauts utilisés UNIQUEMENT à l'amorçage (ensuite l'item fait foi)
+          TICK_MS: "1500"
+          PAUSE_MS: "15000"
+      Policies:
+        - DynamoDBCrudPolicy:           # SAM génère la policy IAM minimale sur CETTE table
+            TableName: !Ref RallyStateTable
+      Events:
+        Heartbeat:
+          Type: Schedule               # = règle EventBridge (plancher : rate(1 minute))
+          Properties:
+            Schedule: rate(1 minute)
+            Name: rally-heartbeat
+            Description: Reboucle le match quand un cycle est écoulé.
+
+Outputs:
+  TableName:
+    Value: !Ref RallyStateTable
+  FunctionName:
+    Value: !Ref RollFunction

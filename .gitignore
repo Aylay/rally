@@ -28,3 +28,6 @@ Thumbs.db
 
 # Coverage / tests
 coverage/
+
+# AWS SAM artifacts
+.aws-sam/
