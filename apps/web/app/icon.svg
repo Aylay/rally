@@ -1,0 +1,18 @@
+<svg viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Rally">
+  <defs>
+    <clipPath id="pill"><rect x="12" y="26" width="40" height="12" rx="6"/></clipPath>
+    <linearGradient id="tile" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#11161f"/><stop offset="1" stop-color="#0a0d12"/>
+    </linearGradient>
+  </defs>
+  <!-- arena-night tile -->
+  <rect width="64" height="64" rx="15" fill="url(#tile)"/>
+  <rect x="0.75" y="0.75" width="62.5" height="62.5" rx="14.25" fill="none" stroke="#202a38" stroke-width="1.5"/>
+  <!-- momentum bar : gold base (Australia), cobalt lead (France) leaning right -->
+  <g clip-path="url(#pill)">
+    <rect x="12" y="26" width="40" height="12" fill="#f5c518"/>
+    <polygon points="12,26 41,26 35,38 12,38" fill="#3b74ff"/>
+    <line x1="41" y1="26" x2="35" y2="38" stroke="#0a0d12" stroke-width="2"/>
+    <rect x="12" y="26" width="40" height="3.5" fill="#ffffff" opacity="0.14"/>
+  </g>
+</svg>
