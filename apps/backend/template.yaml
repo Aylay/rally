@@ -51,8 +51,33 @@ Resources:
             Name: rally-guardian
             Description: Garantit l'anchor de base ; reprendra la transition de match en V2.
 
+  # Endpoint public GET : publie l'anchor (+ serverNow pour le calage). Lecture seule.
+  StateFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: rally-state
+      CodeUri: state/
+      Handler: index.handler
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref RallyStateTable
+          MATCH_PK: "match#fra_aus_2019"
+      Policies:
+        - DynamoDBReadPolicy:          # least-priv : cette Lambda ne fait que LIRE
+            TableName: !Ref RallyStateTable
+      FunctionUrlConfig:
+        AuthType: NONE                 # endpoint public (donnée non sensible, lecture seule)
+        Cors:
+          AllowOrigins:
+            - "https://rally.lucas-attali.me"
+            - "http://localhost:3000"  # ajoute d'autres origines si besoin
+          AllowMethods: ["GET"]
+
 Outputs:
   TableName:
     Value: !Ref RallyStateTable
   FunctionName:
     Value: !Ref RollFunction
+  StateUrl:
+    Description: URL publique de l'anchor (à brancher dans le front)
+    Value: !GetAtt StateFunctionUrl.FunctionUrl
