@@ -1,3 +1,3 @@
-export * from "./events.js";
-export * from "./engine.js";
-export * from "./predictions.js";
+export * from "./events";
+export * from "./engine";
+export * from "./predictions";

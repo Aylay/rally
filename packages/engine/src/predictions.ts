@@ -20,10 +20,14 @@ export interface Bet {
  * resolveOn choisit le décompte : score par équipe OU points par joueur.
  * On parcourt les options déclarées (pas les clés du décompte) avec 0 par défaut.
  */
-export function resolve(prediction: Prediction, state: MatchState): string {
+export function resolve(prediction: Prediction, state: MatchState): string[] {
   const tally = prediction.resolveOn === "player" ? state.pointsByPlayer : state.scoreByTeam;
-  const [winner] = prediction.options
-    .map((opt) => [opt, tally[opt] ?? 0] as const)
-    .reduce((best, cur) => (cur[1] > best[1] ? cur : best));
-  return winner;
+  // on ne regarde QUE les options déclarées (?? 0), jamais les clés du décompte
+  const scored = prediction.options.map((o) => ({ option: o, value: tally[o] ?? 0 }));
+  const max = Math.max(...scored.map((s) => s.value));
+  // ÉGALITÉ : toutes les options à `max` gagnent
+  return scored.filter((s) => s.value === max).map((s) => s.option);
 }
+// un pari gagne si son choix est dans l'ensemble gagnant
+export const isWinningChoice = (p: Prediction, s: MatchState, choice: string) =>
+  resolve(p, s).includes(choice);
