@@ -1,4 +1,5 @@
 "use client";
+import Presence from "./Presence";
 
 import { useState, useEffect } from "react";
 import { SEED_EVENTS, deriveState, resolve } from "@rally/engine";
@@ -195,6 +196,8 @@ export default function Home() {
             </span>
           </div>
         </header>
+
+        <Presence />
 
         <section style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 16, padding: "26px 28px 30px" }}>
           <div style={{ display: "grid", gridTemplateColumns: "1fr auto 1fr", alignItems: "center", gap: 14 }}>

@@ -73,6 +73,84 @@ Resources:
             - "http://localhost:3000"  # ajoute d'autres origines si besoin
           AllowMethods: ["GET"]
 
+  # --- WebSocket (sous-tranche A) : présence live + unicité du pseudo ---
+
+  ConnectionsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: RallyConnections
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - { AttributeName: connectionId, AttributeType: S }
+      KeySchema:
+        - { AttributeName: connectionId, KeyType: HASH }
+
+  NamesTable:                        # existe uniquement pour la réservation atomique du pseudo
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: RallyNames
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - { AttributeName: name, AttributeType: S }
+      KeySchema:
+        - { AttributeName: name, KeyType: HASH }
+
+  WsFunction:                        # UNE Lambda pour toutes les routes ($connect / join / $disconnect)
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: rally-ws
+      CodeUri: ws/
+      Handler: index.handler
+      Environment:
+        Variables:
+          CONNECTIONS_TABLE: !Ref ConnectionsTable
+          NAMES_TABLE: !Ref NamesTable
+      Policies:
+        - DynamoDBCrudPolicy: { TableName: !Ref ConnectionsTable }
+        - DynamoDBCrudPolicy: { TableName: !Ref NamesTable }
+        - Statement:                 # droit de POUSSER aux clients connectés (broadcast)
+            - Effect: Allow
+              Action: execute-api:ManageConnections
+              Resource: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${WebSocketApi}/*/POST/@connections/*"
+
+  # SAM n'a pas de sucre WebSocket → on écrit l'API ApiGatewayV2 à la main.
+  WebSocketApi:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Name: rally-ws
+      ProtocolType: WEBSOCKET
+      RouteSelectionExpression: "$request.body.action"   # le client envoie {"action":"join", ...}
+
+  WsIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref WebSocketApi
+      IntegrationType: AWS_PROXY
+      IntegrationMethod: POST
+      IntegrationUri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${WsFunction.Arn}/invocations"
+
+  ConnectRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties: { ApiId: !Ref WebSocketApi, RouteKey: "$connect", Target: !Sub "integrations/${WsIntegration}" }
+  DisconnectRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties: { ApiId: !Ref WebSocketApi, RouteKey: "$disconnect", Target: !Sub "integrations/${WsIntegration}" }
+  JoinRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties: { ApiId: !Ref WebSocketApi, RouteKey: "join", Target: !Sub "integrations/${WsIntegration}" }
+
+  WsStage:
+    Type: AWS::ApiGatewayV2::Stage
+    Properties: { ApiId: !Ref WebSocketApi, StageName: prod, AutoDeploy: true }
+
+  WsInvokePermission:                # autorise API Gateway à invoquer la Lambda
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref WsFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${WebSocketApi}/*/*"
+
 Outputs:
   TableName:
     Value: !Ref RallyStateTable
@@ -81,3 +159,6 @@ Outputs:
   StateUrl:
     Description: URL publique de l'anchor (à brancher dans le front)
     Value: !GetAtt StateFunctionUrl.FunctionUrl
+  WebSocketUrl:
+    Description: URL WSS (wscat + front)
+    Value: !Sub "wss://${WebSocketApi}.execute-api.${AWS::Region}.amazonaws.com/${WsStage}"
