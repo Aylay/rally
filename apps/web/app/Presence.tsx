@@ -1,83 +1,21 @@
 "use client";
-// Rally — A2 : présence live (WebSocket). Composant ISOLÉ : toute la logique WS vit ici,
-// page.tsx ne fait que <Presence />. Additif pur : ne touche ni l'horloge ni le scoreboard.
-//
-// Cycle de vie :
-//   1) on ouvre le socket au montage (connecting)
-//   2) l'utilisateur choisit un pseudo → {action:"join", name}
-//   3) le serveur diffuse le roster → si mon pseudo y est, je suis "joined"
-//      (ou {type:"name_taken"} → on redemande)
-//   4) si le socket tombe, on se reconnecte (backoff) et on re-claim le pseudo.
-// Pas d'URL / socket mort → le composant se masque (fallback gracieux : le reste de l'app tourne).
-import { useEffect, useRef, useState } from "react";
+// Presence — AFFICHAGE seul. La logique socket vit dans useRallyRoom (le hook partagé) ;
+// ce composant reçoit tout en props. Même UI qu'avant, zéro WebSocket dedans.
+import type { RoomStatus } from "./useRallyRoom";
 
-const WS_URL = process.env.NEXT_PUBLIC_RALLY_WS_URL;
 const C = { panel: "#0e141d", line: "#202a38", ink: "#f1efe9", muted: "#828c9c", live: "#ff5640", win: "#34e29a" };
 
-type Status = "off" | "connecting" | "connected" | "joining" | "joined" | "taken";
+type Props = {
+  status: RoomStatus;
+  roster: string[];
+  name: string;
+  setName: (n: string) => void;
+  me: string | null;
+  join: () => void;
+};
 
-export default function Presence() {
-  const [status, setStatus] = useState<Status>(WS_URL ? "connecting" : "off");
-  const [roster, setRoster] = useState<string[]>([]);
-  const [name, setName] = useState("");
-  const [me, setMe] = useState<string | null>(null);
-
-  const wsRef = useRef<WebSocket | null>(null);
-  const meRef = useRef<string | null>(null);   // miroir de `me` pour le re-claim après reconnexion
-  const retryRef = useRef(0);                    // compteur de backoff
-  const byUsRef = useRef(false);                 // fermeture volontaire (unmount) → pas de reconnexion
-
-  useEffect(() => {
-    if (!WS_URL) return;
-    byUsRef.current = false;
-
-    function connect() {
-      const ws = new WebSocket(WS_URL as string);
-      wsRef.current = ws;
-
-      ws.onopen = () => {
-        retryRef.current = 0;
-        // Reconnexion : si on avait déjà un pseudo, on le re-réclame automatiquement.
-        if (meRef.current) { setStatus("joining"); ws.send(JSON.stringify({ action: "join", name: meRef.current })); }
-        else setStatus("connected");
-      };
-
-      ws.onmessage = (ev) => {
-        let msg: { type?: string; players?: string[]; name?: string };
-        try { msg = JSON.parse(ev.data); } catch { return; }
-
-        if (msg.type === "roster") {
-          setRoster(msg.players ?? []);
-          // Mon pseudo est dans le roster → ma réservation a réussi, je suis dedans.
-          if (meRef.current && msg.players?.includes(meRef.current)) setStatus("joined");
-        } else if (msg.type === "name_taken") {
-          meRef.current = null; setMe(null); setStatus("taken");   // on garde `name` dans l'input pour retenter
-        }
-      };
-
-      ws.onerror = () => { try { ws.close(); } catch {} };
-
-      ws.onclose = () => {
-        if (byUsRef.current) return;                 // unmount volontaire : on ne reconnecte pas
-        setStatus("connecting");
-        const delay = Math.min(2000 * 2 ** retryRef.current++, 15000); // 2s, 4s, 8s… plafonné 15s
-        window.setTimeout(connect, delay);
-      };
-    }
-
-    connect();
-    return () => { byUsRef.current = true; wsRef.current?.close(); };
-  }, []);
-
-  function join() {
-    const n = name.trim();
-    const ws = wsRef.current;
-    if (!n || !ws || ws.readyState !== WebSocket.OPEN) return;
-    meRef.current = n; setMe(n); setStatus("joining");
-    ws.send(JSON.stringify({ action: "join", name: n }));
-  }
-
-  if (!WS_URL) return null; // fallback gracieux : rien à afficher si le WS n'est pas configuré
+export default function Presence({ status, roster, name, setName, me, join }: Props) {
+  if (status === "off") return null; // pas de WS configuré → la section disparaît, l'app tourne
 
   const joined = status === "joined";
   const others = roster.filter((r) => r !== me);
