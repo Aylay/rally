@@ -45,14 +45,20 @@ export function computeStandings(opts: {
 
   for (const p of predictions) {
     if (seq < p.resolveAtSequence) continue; // pas encore résolue → aucun point
-    const winner = resolve(
+    // Règle d'égalité du moteur : resolve() renvoie string[] (tous les ex æquo gagnent).
+    const winners = resolve(
       { id: p.id, question: "", options: p.options, resolveAtSequence: p.resolveAtSequence, resolveOn: p.resolveOn },
       deriveState(events, p.resolveAtSequence),
     );
     const tallyAtLock = tallyOf(deriveState(events, p.lockAtSequence), p.resolveOn);
 
-    for (const h of humans) if (humanPicks[h]?.[p.id] === winner) points[h] += pointsPerHit;
-    for (const b of BOTS) if (botPick(cycleIndex, p.id, b, p.options, tallyAtLock) === winner) points[b.id] += pointsPerHit;
+    for (const h of humans) {
+      const pick = humanPicks[h]?.[p.id];
+      if (pick != null && winners.includes(pick)) points[h] += pointsPerHit;
+    }
+    for (const b of BOTS) {
+      if (winners.includes(botPick(cycleIndex, p.id, b, p.options, tallyAtLock))) points[b.id] += pointsPerHit;
+    }
   }
 
   const rows: Standing[] = [
