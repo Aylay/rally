@@ -1,48 +1,93 @@
-# Rally
+# Rally 🏀
 
-A real-time sports **match companion** — a second-screen app where fans predict key moments of a live game, earn points, and climb a live leaderboard. Basketball first. Zero money, zero betting.
+**A shared real-time match companion — where every client derives the same truth, and the server does almost nothing.**
 
-> 🚧 Work in progress — a portfolio & learning project.
+Everyone who opens Rally sees the exact same second of the match. Join with a nickname, see who else is watching, make predictions on key moments, climb a live multiplayer leaderboard against other visitors and deterministic CPU bots. No accounts, no money, no betting — a fan-engagement game.
 
-## Why this exists
+**▶ Live demo: [rally.lucas-attali.me](https://rally.lucas-attali.me)**
+**📖 Full technical write-up: [lucas-attali.me](https://lucas-attali.me/en/projets/rally/write-up)**
 
-Rally demonstrates, end to end: **real-time event-driven architecture**, an **event-sourced** data model, and **gamified fan engagement** — on a serverless AWS backend with a Next.js front.
+---
 
-## Core idea
+## The two rules that shape the system
 
-The whole app derives from a single **append-only stream of match events**. Score, player points, period and the live leaderboard are never stored as truth — they are recomputed by *folding* the event stream. The match replays on an **authoritative server clock** and **loops continuously**, so the experience is live 24/7 even when no real game is on.
+1. **Derive, don't store.** The whole match clock is one fixed timestamp (`baseStartedAt`) in DynamoDB. Current event, loop index, break windows — all modulo arithmetic, computed on demand. The match "runs" 24/7 at zero cost because it doesn't run at all.
+2. **The server only carries what cannot be derived.** Presence and picks travel through a WebSocket relay. Everything downstream — bot decisions, correct answers, points, tie-aware ranks — every client computes locally and lands on the same result, bit for bit.
 
-## Architecture in one breath
+No scoring server. No game loop. Wall-clock differences between clients don't matter, because wall-clock time is never an input to the shared state.
 
-- **Event sourcing** — append-only events ordered by `sequence`; state is a fold over the stream.
-- **Shared broadcast (Model B)** — one server clock; every connected client sees the same moment.
-- **Snapshot + live** — a newcomer receives a snapshot (the fold up to *now*), then single events live. The same primitive (`applyEvent`) powers both.
-- **Planned cloud** — Vercel (front) + AWS (Lambda, API Gateway WebSocket, DynamoDB, EventBridge Scheduler).
+## Architecture
 
-## Tech stack
+```
+            ┌────────────────────────── AWS (eu-west-3, SAM) ─────────────────────────┐
+            │                                                                         │
+ Browser ───┼─ GET anchor ──► Lambda rally-state ──► DynamoDB RallyState (1 item:     │
+   │        │   (Function URL, returns serverNow      the fixed baseStartedAt anchor) │
+   │        │    for clock offset sync)                        ▲                      │
+   │        │                                                  │ ensure/self-heal     │
+   │        │                              EventBridge (1h) ──► Lambda rally-roll     │
+   │        │                                                                         │
+   └─ WSS ──┼─► API Gateway WebSocket ──► Lambda rally-ws ──► RallyConnections        │
+            │   $connect / join / pick /    (pure relay:       RallyNames (atomic     │
+            │   $disconnect                 presence + picks,   nickname item-lock)   │
+            │                               zero scoring)                             │
+            └─────────────────────────────────────────────────────────────────────────┘
 
-TypeScript · React / Next.js *(front, in progress)* · AWS *(backend, planned)* · pnpm
+ Front: Next.js on Vercel — derives seq/cycle from the shared clock, folds the
+ leaderboard client-side via @rally/engine. Graceful fallback to local replay
+ if the anchor is unreachable.
+```
 
-## Run the engine locally
+**Key mechanics**
+
+- **Shared clock (Model B/D)** — clients fetch the anchor once, compute `offset = serverNow − Date.now()`, then derive everything from `Date.now() + offset`. The client interval only repaints; it owns no state.
+- **Identity = the connection** — on `pick`, the server stamps the nickname stored against your `connectionId`. Names inside messages are never trusted, so you cannot pick as someone else.
+- **Atomic nickname uniqueness** — `join` writes to `RallyNames` with `attribute_not_exists`; DynamoDB serializes conditional writes, so two people claiming the same name in the same millisecond can never both win.
+- **Deterministic bots** — a seeded PRNG (xmur3 → mulberry32, 32-bit integer ops) keyed on `(cycleIndex, predictionId, botId)`. Same decisions on every client, zero communication, fresh behaviour every loop.
+- **Tie-aware shared ranking** — standard competition ranking (1224), tiebreak by code-unit comparison (not `localeCompare`, which is locale-dependent and would break cross-client determinism).
+
+## Monorepo
+
+```
+packages/engine    @rally/engine — pure TypeScript, no I/O: event stream, state folds,
+                   prediction resolution, seeded bots, leaderboard. Runs in the browser
+                   today, can run in a Lambda tomorrow (V2 server-side validation).
+apps/web           @rally/web — Next.js App Router front (Vercel).
+apps/backend       AWS SAM project (outside the pnpm workspace): template.yaml,
+                   3 Lambdas (state / roll / ws), Node 22 on arm64.
+```
+
+## Run it locally
 
 ```bash
 pnpm install
-pnpm start     # fold the event stream → derived state + a point-in-time snapshot
-pnpm tick      # the heartbeat: the match advances beat by beat, looping forever
-pnpm client    # proves a late-joining client converges with an early one
-pnpm predict   # predictions resolve from derived state → leaderboard
+pnpm --filter @rally/web dev        # http://localhost:3000
 ```
 
-## Seed match
+Without env vars the app runs in **local replay mode** (no shared clock, no multiplayer) — it never breaks. To plug into a deployed backend, set in `apps/web/.env.local`:
 
-France vs. Australia — bronze-medal game, 2019 FIBA World Cup (France won 67–59), chosen for its dramatic momentum swing. Live NBA data comes in v2.
+```bash
+NEXT_PUBLIC_RALLY_STATE_URL=...     # SAM output: StateUrl
+NEXT_PUBLIC_RALLY_WS_URL=...        # SAM output: WebSocketUrl
+```
 
-## Status
+## Deploy the backend
 
-- [x] Event-sourcing core (fold, snapshot)
-- [x] Heartbeat loop (server clock, infinite replay)
-- [x] Snapshot-on-join + live broadcast (client convergence)
-- [x] Predictions + per-cycle leaderboard
-- [ ] React / Next.js front
-- [ ] AWS backend (WebSocket, DynamoDB, EventBridge)
-- [ ] Live data via API (NBA) — v2
+```bash
+cd apps/backend
+sam build && sam deploy             # stack: rally-backend (eu-west-3)
+```
+
+Outputs include the public anchor URL and the WSS endpoint. Teardown: `sam delete --stack-name rally-backend`.
+
+## Honest limits (V1) & roadmap
+
+- The pick lock is enforced client-side (on send **and** on receive) — server-side enforcement, reusing `@rally/engine` inside the Lambda, is the V2 hardening.
+- The relay keeps no history: join mid-loop and you only see picks sent after you connected, until the next loop resets everyone.
+- The demo is a **replay** of the 2019 FIBA World Cup bronze final (73 verified play-by-play events) and labeled as such — no fake "live". V2 targets real NBA feeds (webhook ingestion, push model, idempotent writes).
+
+**Never in scope:** sports betting or real money, in any form.
+
+---
+
+Personal portfolio project — [Lucas Attali](https://lucas-attali.me) · [LinkedIn](https://www.linkedin.com/in/lucasattali/)
