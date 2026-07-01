@@ -138,6 +138,9 @@ Resources:
   JoinRoute:
     Type: AWS::ApiGatewayV2::Route
     Properties: { ApiId: !Ref WebSocketApi, RouteKey: "join", Target: !Sub "integrations/${WsIntegration}" }
+  PickRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties: { ApiId: !Ref WebSocketApi, RouteKey: "pick", Target: !Sub "integrations/${WsIntegration}" }
 
   WsStage:
     Type: AWS::ApiGatewayV2::Stage
