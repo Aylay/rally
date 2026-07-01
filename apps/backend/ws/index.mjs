@@ -21,6 +21,7 @@ export const handler = async (event) => {
     switch (routeKey) {
       case "$connect":    return await onConnect(connectionId);
       case "join":        return await onJoin(api, connectionId, event.body);
+      case "pick":        return await onPick(api, connectionId, event.body);
       case "$disconnect": return await onDisconnect(api, connectionId);
       default:            return { statusCode: 200 };
     }
@@ -73,6 +74,26 @@ async function onJoin(api, id, body) {
   return { statusCode: 200 };
 }
 
+// pick : RELAY pur. Le serveur ne score rien — il distribue le seul non-dérivable
+// (qui a parié quoi). Le pseudo est ATTACHÉ CÔTÉ SERVEUR (lu en table, jamais pris
+// dans le message) → impossible de picker en se faisant passer pour un autre.
+// Pas de pseudo (pas de join) → pick ignoré.
+async function onPick(api, id, body) {
+  let msg;
+  try { msg = JSON.parse(body); } catch { return { statusCode: 200 }; }
+  const { predictionId, choice, cycleIndex } = msg ?? {};
+  if (typeof predictionId !== "string" || typeof choice !== "string" || typeof cycleIndex !== "number") {
+    return { statusCode: 200 }; // malformé → on ignore (pas d'erreur bavarde)
+  }
+
+  const { Item } = await ddb.send(new GetItemCommand({ TableName: CONN, Key: { connectionId: { S: id } } }));
+  const name = Item?.name?.S;
+  if (!name) return { statusCode: 200 }; // pas join → pas de pick
+
+  await broadcast(api, { type: "pick", name, predictionId, choice, cycleIndex });
+  return { statusCode: 200 };
+}
+
 // $disconnect : on libère le pseudo (item-lock) + la connexion, on rediffuse.
 async function onDisconnect(api, id) {
   const { Item } = await ddb.send(new GetItemCommand({ TableName: CONN, Key: { connectionId: { S: id } } }));
@@ -90,6 +111,13 @@ async function broadcastRoster(api) {
   const { Items = [] } = await ddb.send(new ScanCommand({ TableName: CONN }));
   const players = Items.filter((i) => i.name?.S).map((i) => i.name.S);
   const msg = { type: "roster", players, count: players.length };
+  await Promise.all(Items.map((i) => send(api, i.connectionId.S, msg)));
+}
+
+// Broadcast générique : envoie un message à TOUTES les connexions (même pas-encore-join,
+// un spectateur peut vouloir voir le leaderboard bouger sans participer).
+async function broadcast(api, msg) {
+  const { Items = [] } = await ddb.send(new ScanCommand({ TableName: CONN }));
   await Promise.all(Items.map((i) => send(api, i.connectionId.S, msg)));
 }
 
