@@ -1,8 +1,9 @@
 "use client";
 import Presence from "./Presence";
+import useRallyRoom from "./useRallyRoom";
 
-import { useState, useEffect } from "react";
-import { SEED_EVENTS, deriveState, resolve } from "@rally/engine";
+import { useState, useEffect, useRef } from "react";
+import { SEED_EVENTS, deriveState, resolve, computeStandings, BOTS, botPick } from "@rally/engine";
 
 // Points par type — AFFICHAGE uniquement (badge +2/+3 du feed). La vérité du score
 // vit dans le moteur ; ceci ne sert qu'au feed.
@@ -30,11 +31,7 @@ const labelOf = (id: string) => (isTeam(id) ? nameOf(id) : PLAYERS[id] ?? id);
 const shortOf = (id: string) => (isTeam(id) ? abbrOf(id) : PLAYERS[id] ?? id);
 const dotColorOf = (id: string) => (isTeam(id) ? colorOf(id) : colorOf(PLAYER_TEAM[id] ?? ""));
 
-const BOTS = [
-  { id: "cpu_chalk", name: "Chalk", skill: 0.85 }, // suit le favori au lock
-  { id: "cpu_flip",  name: "Flip",  skill: 0.55 }, // pile ou face
-  { id: "cpu_rebel", name: "Rebel", skill: 0.30 }, // contrarian
-];
+// Les bots vivent dans le moteur (@rally/engine) : déterministes, semés sur (manche, prédiction, bot).
 
 // File de prédictions : une carte à la fois. Fenêtres non chevauchantes sur le seed.
 // open/lockAtSequence = timing UI en v1 ; ils passeront serveur (lock imposé par la Lambda) en v2.
@@ -60,10 +57,24 @@ export default function Home() {
   const [offset, setOffset] = useState(0); // calage d'horloge : serverNow − clientNow
   const [picks, setPicks] = useState<Record<string, string>>({});
   const [results, setResults] = useState<Record<string, Result>>({});
-  const [botPicks, setBotPicks] = useState<Record<string, Record<string, string>>>({});
   const [points, setPoints] = useState(0);
   const [done, setDone] = useState<Record<string, boolean>>({});
   const last = SEED_EVENTS[SEED_EVENTS.length - 1].sequence;
+
+  // Miroir de seq pour les callbacks du socket (closure → ils liraient une valeur figée).
+  const seqRef = useRef(0);
+  seqRef.current = seq;
+
+  // LA room partagée : présence + relay des picks, une seule connexion pour tout.
+  // canAcceptPick = règle du lock, vérifiée CLIENT en V1 (imposée Lambda en V2) :
+  // un pick reçu après lockAtSequence est ignoré.
+  const room = useRallyRoom({
+    cycle,
+    canAcceptPick: (pid) => {
+      const p = PREDICTIONS.find((x) => x.id === pid);
+      return !!p && lifecycle(p, seqRef.current) === "open";
+    },
+  });
 
   // 1) On récupère l'anchor partagé UNE fois → calage d'horloge (offset). Échec = replay local.
   useEffect(() => {
@@ -105,25 +116,13 @@ export default function Home() {
   }, [anchor, seq, paused, last]);
 
   // reset à chaque nouvelle manche (`done` est gardé par cycle, pas besoin de le vider)
-  useEffect(() => { setPicks({}); setResults({}); setBotPicks({}); }, [cycle]);
+  useEffect(() => { setPicks({}); setResults({}); }, [cycle]);
 
-  // lock des bots + résolution, sur toutes les prédictions, une fois chacune par manche
+  // résolution : résultat PERSONNEL (carte + compteur PTS), une fois par prédiction et par manche.
+  // Les picks des bots ne se stockent plus : ils se DÉRIVENT (botPick, semé) — plus aucun Math.random.
   useEffect(() => {
     for (const p of PREDICTIONS) {
       const ph = lifecycle(p, seq);
-      const lockKey = `${cycle}:lock:${p.id}`;
-      if ((ph === "locked" || ph === "resolved") && !done[lockKey]) {
-        const atLock = deriveState(SEED_EVENTS, p.lockAtSequence);
-        const tally: Record<string, number> = p.resolveOn === "player" ? atLock.pointsByPlayer : atLock.scoreByTeam;
-        const ranked = [...p.options].sort((a, b) => (tally[b] ?? 0) - (tally[a] ?? 0));
-        const fav = ranked[0], und = ranked[ranked.length - 1];
-        const noInfo = (tally[fav] ?? 0) === (tally[und] ?? 0); // rien à se mettre sous la dent → hasard
-        const bp: Record<string, string> = {};
-        for (const b of BOTS) bp[b.id] = noInfo ? p.options[Math.floor(Math.random() * p.options.length)]
-                                               : (Math.random() < b.skill ? fav : und);
-        setBotPicks((prev) => ({ ...prev, [p.id]: bp }));
-        setDone((prev) => ({ ...prev, [lockKey]: true }));
-      }
       const resKey = `${cycle}:res:${p.id}`;
       if (ph === "resolved" && !done[resKey]) {
         const winners = resolve(p, deriveState(SEED_EVENTS, p.resolveAtSequence));
@@ -152,21 +151,35 @@ export default function Home() {
   const phase: Phase = active ? lifecycle(active, seq) : "hidden";
   const aPick = active ? picks[active.id] ?? null : null;
   const aRes = active ? results[active.id] ?? null : null;
-  const aBots = active ? botPicks[active.id] ?? {} : {};
   const aIndex = active ? PREDICTIONS.indexOf(active) + 1 : 0;
   const secsToLock = active ? Math.max(0, Math.ceil((active.lockAtSequence - seq) * TICK_MS / 1000)) : 0;
   const lockFraction = active ? Math.max(0, Math.min(1, (active.lockAtSequence - seq) / (active.lockAtSequence - active.openAtSequence))) : 0;
 
-  // classement DE LA MANCHE : points cumulés sur toutes les prédictions résolues ce cycle
-  const loopPts = (pickFor: (pid: string) => string | null) => PREDICTIONS.reduce((sum, p) => {
-    const ws = results[p.id]?.winners ?? null; if (ws == null) return sum;
-    const ch = pickFor(p.id); return sum + (ch != null && ws.includes(ch) ? WIN_POINTS : 0);
-  }, 0);
-  let standings = [
-    { id: "you", name: "You", you: true, pts: loopPts((pid) => picks[pid] ?? null), apick: aPick },
-    ...BOTS.map((b) => ({ id: b.id, name: b.name, you: false,
-      pts: loopPts((pid) => botPicks[pid]?.[b.id] ?? null), apick: aBots[b.id] ?? null })),
-  ].sort((a, b) => b.pts - a.pts || (a.you ? -1 : b.you ? 1 : 0));
+  // classement DE LA MANCHE — le fold PARTAGÉ du moteur. Entrées : la manche, les picks
+  // humains (les miens en local + ceux reçus du relay), le flux figé. Bots + bonne réponse
+  // dérivés dedans → même classement au bit près sur chaque client.
+  const myName = room.me ?? "You";
+  const humanPicks: Record<string, Record<string, string>> = { ...room.remotePicks };
+  for (const n of room.roster) humanPicks[n] = humanPicks[n] ?? {};   // présent → au tableau, même à 0 pt
+  humanPicks[myName] = { ...humanPicks[myName], ...picks };           // mes picks, immédiats (l'écho relay est idempotent)
+  const standings = computeStandings({ cycleIndex: cycle, seq, events: SEED_EVENTS, predictions: PREDICTIONS, humanPicks, pointsPerHit: WIN_POINTS });
+
+  // Pastille « pick du joueur » sur la prédiction active : le MIEN visible tout de suite ;
+  // ceux des AUTRES (humains ET bots) révélés au lock — pour empêcher le copiage pendant l'open.
+  const revealed = phase === "locked" || phase === "resolved";
+  const aTallyLock = active && revealed
+    ? (active.resolveOn === "player" ? deriveState(SEED_EVENTS, active.lockAtSequence).pointsByPlayer
+                                     : deriveState(SEED_EVENTS, active.lockAtSequence).scoreByTeam)
+    : null;
+  const chipFor = (s: { id: string; name: string; isBot: boolean }): string | null => {
+    if (!active) return null;
+    if (s.isBot) {
+      const bot = BOTS.find((b) => b.id === s.id);
+      return revealed && bot && aTallyLock ? botPick(cycle, active.id, bot, active.options, aTallyLock) : null;
+    }
+    if (s.name === myName) return aPick;
+    return revealed ? room.remotePicks[s.name]?.[active.id] ?? null : null;
+  };
 
   return (
     <main style={{ background: `radial-gradient(130% 90% at 50% -15%, #18263b 0%, transparent 55%), ${C.bg}`,
@@ -197,7 +210,7 @@ export default function Home() {
           </div>
         </header>
 
-        <Presence />
+        <Presence status={room.status} roster={room.roster} name={room.name} setName={room.setName} me={room.me} join={room.join} />
 
         <section style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 16, padding: "26px 28px 30px" }}>
           <div style={{ display: "grid", gridTemplateColumns: "1fr auto 1fr", alignItems: "center", gap: 14 }}>
@@ -235,27 +248,33 @@ export default function Home() {
           </div>
         </section>
 
-        {/* standings — toi vs bots CPU, cumulé sur la manche */}
+        {/* standings — le classement PARTAGÉ : toi + joueurs connectés + bots CPU, dérivé à l'identique partout */}
         <section style={{ marginTop: 22 }}>
           <div className="mono" style={{ fontSize: 11, letterSpacing: "0.22em", color: C.muted, marginBottom: 10, display: "flex", justifyContent: "space-between" }}>
             <span>STANDINGS · THIS LOOP</span><span style={{ opacity: 0.7 }}>🤖 = CPU</span>
           </div>
           <div style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 12, overflow: "hidden" }}>
-            {standings.map((e, idx) => (
-              <div key={e.id} style={{ display: "flex", alignItems: "center", gap: 12, padding: "10px 14px",
-                                       background: e.you ? "#141d2b" : "transparent", borderTop: idx === 0 ? "none" : `1px solid ${C.line}` }}>
-                <span className="mono" style={{ width: 14, fontSize: 12, color: C.muted }}>{idx + 1}</span>
-                <span style={{ fontSize: 13, width: 18, textAlign: "center" }}>{e.you ? "🧑" : "🤖"}</span>
-                <span style={{ flex: 1, fontWeight: e.you ? 700 : 600, fontSize: 14, color: e.you ? C.ink : "#c3c9d4" }}>{e.you ? "You" : `CPU · ${e.name}`}</span>
-                {e.apick
-                  ? <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                      <span style={{ width: 8, height: 8, borderRadius: 2, background: dotColorOf(e.apick) }} />
-                      <span className="mono" style={{ fontSize: 11, color: C.muted }}>{shortOf(e.apick)}</span>
-                    </span>
-                  : <span className="mono" style={{ fontSize: 11, color: C.muted, opacity: 0.5 }}>…</span>}
-                <span className="mono" style={{ fontSize: 13, fontWeight: 700, minWidth: 30, textAlign: "right", color: e.pts > 0 ? C.win : C.muted }}>{e.pts}</span>
-              </div>
-            ))}
+            {standings.map((s, idx) => {
+              const isYou = !s.isBot && s.name === myName;
+              const chip = chipFor(s);
+              return (
+                <div key={s.id} style={{ display: "flex", alignItems: "center", gap: 12, padding: "10px 14px",
+                                         background: isYou ? "#141d2b" : "transparent", borderTop: idx === 0 ? "none" : `1px solid ${C.line}` }}>
+                  <span className="mono" style={{ width: 14, fontSize: 12, color: C.muted }}>{s.rank}</span>
+                  <span style={{ fontSize: 13, width: 18, textAlign: "center" }}>{s.isBot ? "🤖" : "🧑"}</span>
+                  <span style={{ flex: 1, fontWeight: isYou ? 700 : 600, fontSize: 14, color: isYou ? C.ink : "#c3c9d4" }}>
+                    {s.isBot ? `CPU · ${s.name}` : s.name}{isYou && s.name !== "You" && <span style={{ color: C.muted, fontWeight: 500 }}> (you)</span>}
+                  </span>
+                  {chip
+                    ? <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                        <span style={{ width: 8, height: 8, borderRadius: 2, background: dotColorOf(chip) }} />
+                        <span className="mono" style={{ fontSize: 11, color: C.muted }}>{shortOf(chip)}</span>
+                      </span>
+                    : <span className="mono" style={{ fontSize: 11, color: C.muted, opacity: 0.5 }}>…</span>}
+                  <span className="mono" style={{ fontSize: 13, fontWeight: 700, minWidth: 30, textAlign: "right", color: s.points > 0 ? C.win : C.muted }}>{s.points}</span>
+                </div>
+              );
+            })}
           </div>
         </section>
 
@@ -313,7 +332,10 @@ export default function Home() {
               else { if (isWinner) { border = C.win; col = C.ink; tag = "WINNER"; } else if (isPick) { border = C.live; col = C.muted; }
                      if (isPick && !isWinner) tag = "YOUR PICK"; if (isPick && isWinner) tag = "YOUR PICK ✓"; }
               return (
-                <button key={opt} onClick={() => phase === "open" && active && setPicks((prev) => ({ ...prev, [active.id]: opt }))} disabled={phase !== "open"}
+                <button key={opt} onClick={() => { if (phase !== "open" || !active) return;
+                    setPicks((prev) => ({ ...prev, [active.id]: opt }));  // local, immédiat
+                    room.sendPick(active.id, opt);                        // relay aux autres (no-op si pas de socket)
+                  }} disabled={phase !== "open"}
                   style={{ flex: 1, padding: "13px 14px", borderRadius: 12, border: `1.5px solid ${border}`, background: bg, color: col,
                            fontFamily: "inherit", fontWeight: 700, fontSize: 14, cursor: phase === "open" ? "pointer" : "default",
                            transition: "all .2s", display: "flex", flexDirection: "column", alignItems: "center", gap: 3 }}>
